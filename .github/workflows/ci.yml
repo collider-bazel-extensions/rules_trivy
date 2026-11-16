@@ -20,6 +20,12 @@ jobs:
           disk-cache: ${{ github.workflow }}
           repository-cache: true
 
+      # The network-blocking linux-sandbox needs unprivileged user
+      # namespaces; Ubuntu 24.04's AppArmor restricts them by default, and
+      # Bazel then falls back to a sandbox with network.
+      - name: Allow the linux-sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       # .bazelrc: --sandbox_default_allow_network=false, so every scan runs
       # offline on the pinned data (//tests:network_blocked_test checks it).
       - name: bazel test //tests/...

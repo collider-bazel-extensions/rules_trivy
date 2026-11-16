@@ -13,12 +13,12 @@ No host Trivy needed. The binary is the upstream release for linux and darwin on
 ## Installation
 
 ```python
-bazel_dep(name = "rules_trivy", version = "0.1.0")
+bazel_dep(name = "rules_trivy", version = "0.1.1")
 archive_override(
     module_name = "rules_trivy",
-    urls = ["https://github.com/collider-bazel-extensions/rules_trivy/archive/refs/tags/v0.1.0.tar.gz"],
-    strip_prefix = "rules_trivy-0.1.0",
-    integrity = "sha256-zZOueYD5WjBEc284evzq4qzW9eFMSJuhpeFISYsTETY=",
+    urls = ["https://github.com/collider-bazel-extensions/rules_trivy/archive/refs/tags/v0.1.1.tar.gz"],
+    strip_prefix = "rules_trivy-0.1.1",
+    integrity = "sha256-LDIqd49WiVBrohGdzZOf64zJOuLMUVjslMTDevKQoCs=",
 )
 ```
 
@@ -28,7 +28,7 @@ To pin by git tag instead, replace the `archive_override` with:
 git_override(
     module_name = "rules_trivy",
     remote = "https://github.com/collider-bazel-extensions/rules_trivy",
-    tag = "v0.1.0",
+    tag = "v0.1.1",
 )
 ```
 

@@ -1,0 +1,16 @@
+"""A consumer of rules_trivy (local_path_override), run from CI:
+
+    cd tests/consumer && bazel test //...
+
+Exercises rules_trivy from another repository, where its labels and
+runfiles are external (`../rules_trivy+/...`), with an image built by
+rules_oci in the consumer.
+"""
+
+module(name = "consumer")
+
+bazel_dep(name = "rules_trivy", version = "0.1.0")
+local_path_override(module_name = "rules_trivy", path = "../..")
+
+bazel_dep(name = "rules_oci", version = "2.3.0")
+bazel_dep(name = "tar.bzl", version = "0.7.0")

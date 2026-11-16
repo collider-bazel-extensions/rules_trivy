@@ -1,0 +1,7 @@
+vulnerabilities:
+  - id: CVE-2026-22184
+    statement: consumer test - untgz is not shipped
+    expired_at: 2099-12-31
+  - id: CVE-2026-85091
+    statement: consumer test - no gzip output
+    expired_at: 2099-12-31

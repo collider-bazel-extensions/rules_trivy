@@ -1,0 +1,4 @@
+exports_files([
+    "update_db.sh",
+    "update_versions.sh",
+])

@@ -1,0 +1,65 @@
+"""Test images (no base image, nothing pulled): see images.bzl."""
+
+load("@rules_oci//oci:defs.bzl", "oci_image_index", "oci_load")
+load(":images.bzl", "alpine_image")
+
+package(default_visibility = ["//tests:__subpackages__"])
+
+exports_files(["make_jar.py"])
+
+# zlib 1.3.1-r2: two HIGH and two MEDIUM vulnerabilities in the pinned DB.
+alpine_image(
+    name = "vulnerable",
+    installed = ":zlib-1.3.1-r2.installed",
+)
+
+# zlib 1.4-r0: none.
+alpine_image(
+    name = "clean",
+    installed = ":zlib-1.4-r0.installed",
+)
+
+# The vulnerable image as a docker-style tarball (oci_load's `tarball`
+# output group), the other form trivy_image_test reads.
+oci_load(
+    name = "vulnerable_load",
+    image = ":vulnerable",
+    repo_tags = ["rules-trivy/vulnerable:test"],
+)
+
+filegroup(
+    name = "vulnerable_tarball",
+    srcs = [":vulnerable_load"],
+    output_group = "tarball",
+)
+
+# A clean OS plus a jar Trivy identifies as log4j-core 2.14.1 (Log4Shell).
+genrule(
+    name = "log4j_jar",
+    srcs = [":log4j-core.pom.properties"],
+    outs = ["log4j-core-2.14.1.jar"],
+    cmd = "python3 -I $(location :make_jar.py) $< org.apache.logging.log4j log4j-core $@",
+    tools = [":make_jar.py"],
+)
+
+alpine_image(
+    name = "java",
+    files = {"app/log4j-core-2.14.1.jar": ":log4j_jar"},
+    installed = ":zlib-1.4-r0.installed",
+)
+
+# A multi-platform index: the vulnerable image for amd64, the clean one for
+# arm64. trivy_image_test(platform = ...) picks one.
+alpine_image(
+    name = "clean_arm64",
+    architecture = "arm64",
+    installed = ":zlib-1.4-r0.installed",
+)
+
+oci_image_index(
+    name = "multiarch",
+    images = [
+        ":clean_arm64",
+        ":vulnerable",
+    ],
+)

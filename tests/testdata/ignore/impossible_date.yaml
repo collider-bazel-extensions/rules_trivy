@@ -1,0 +1,4 @@
+vulnerabilities:
+  - id: CVE-2026-22184
+    statement: fine
+    expired_at: 2099-02-30

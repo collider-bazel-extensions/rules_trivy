@@ -1,0 +1,21 @@
+# Rendered by //tests:rendered (a stand-in for a Helm or Kustomize render).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rendered
+  namespace: rendered
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rendered
+  template:
+    metadata:
+      labels:
+        app: rendered
+    spec:
+      containers:
+        - name: rendered
+          image: registry.example.com/rendered:1.0
+          securityContext:
+            privileged: PRIVILEGED

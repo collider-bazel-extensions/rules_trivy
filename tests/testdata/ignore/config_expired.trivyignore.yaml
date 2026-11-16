@@ -1,0 +1,4 @@
+misconfigurations:
+  - id: KSV-0017
+    statement: test fixture - expired
+    expired_at: 2021-06-30

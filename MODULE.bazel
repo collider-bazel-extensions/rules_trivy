@@ -1,0 +1,44 @@
+"""rules_trivy — hermetic, offline Trivy scans as Bazel tests.
+
+  trivy_image_test   — test: an image (rules_oci oci_image) has no known
+                       vulnerabilities at or above a severity
+  trivy_config_test  — test: Kubernetes / Helm / Terraform / Dockerfile
+                       configuration (any rule's outputs) has no
+                       misconfigurations at or above a severity
+  trivy_ignore_test  — test: an ignore file is well formed and unexpired
+
+Pinned: Trivy 0.76.2 (upstream release binaries); the vulnerability DB,
+Java DB and checks bundle by OCI manifest digest (private/versions.bzl).
+"""
+
+module(
+    name = "rules_trivy",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "platforms", version = "1.0.0")
+
+# The `trivy` extension creates trivy_<platform> (the binary) and trivy_db,
+# trivy_java_db, trivy_checks (the data), at the root module's pins where it
+# sets them, else at this module's. Each downloads only when a build needs it.
+trivy = use_extension("//:extensions.bzl", "trivy")
+trivy.version(version = "0.76.2")
+use_repo(
+    trivy,
+    "trivy_checks",
+    "trivy_darwin_amd64",
+    "trivy_darwin_arm64",
+    "trivy_db",
+    "trivy_java_db",
+    "trivy_linux_amd64",
+    "trivy_linux_arm64",
+)
+register_toolchains("@rules_trivy//toolchain:all")
+
+# ---- dev-only ---------------------------------------------------------------
+bazel_dep(name = "rules_shell", version = "0.8.0", dev_dependency = True)
+
+# The test images: built from a few small files, no base image.
+bazel_dep(name = "rules_oci", version = "2.3.0", dev_dependency = True)
+bazel_dep(name = "tar.bzl", version = "0.7.0", dev_dependency = True)

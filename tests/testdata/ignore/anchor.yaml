@@ -1,0 +1,3 @@
+vulnerabilities:
+  - &a
+    id: CVE-2026-22184

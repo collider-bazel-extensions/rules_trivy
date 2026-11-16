@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# rules_trivy wrapper: finds the runfiles and runs the driver on host python3.
+# Substitution markers use __KEY__ syntax to avoid colliding with bash.
+set -euo pipefail
+
+if [[ -z "${RUNFILES_DIR:-}" ]]; then
+  if [[ -n "${TEST_SRCDIR:-}" ]]; then RUNFILES_DIR="$TEST_SRCDIR"
+  elif [[ -d "${0}.runfiles" ]]; then RUNFILES_DIR="${0}.runfiles"
+  fi
+  : "${RUNFILES_DIR:?rules_trivy: no runfiles found; run it with bazel test or bazel run}"
+  export RUNFILES_DIR
+fi
+
+driver="__DRIVER__"
+if [[ "$driver" == ../* ]]; then driver="${RUNFILES_DIR}/${driver#../}"; else driver="${RUNFILES_DIR}/_main/${driver}"; fi
+[[ -e "$driver" ]] || { echo "rules_trivy: not in runfiles: __DRIVER__" >&2; exit 2; }
+
+junit=()
+if [[ -n "${XML_OUTPUT_FILE:-}" ]]; then junit=(--junit "$XML_OUTPUT_FILE"); fi
+
+exec python3 -I "$driver" __MODE__ --runfiles __ARGS__ ${junit[@]+"${junit[@]}"} -- __EXTRA__ "$@"

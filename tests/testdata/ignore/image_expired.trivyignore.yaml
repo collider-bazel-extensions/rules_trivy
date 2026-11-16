@@ -1,0 +1,7 @@
+vulnerabilities:
+  - id: CVE-2026-22184
+    statement: test fixture, accepted until 2020
+    expired_at: 2020-01-01
+  - id: CVE-2026-85091
+    statement: test fixture
+    expired_at: 2099-12-31

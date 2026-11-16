@@ -1,0 +1,9 @@
+# Both HIGH zlib findings in //tests/images:vulnerable, accepted until 2099.
+vulnerabilities:
+  - id: CVE-2026-22184
+    statement: "test fixture: the image never decompresses untrusted input"
+    expired_at: 2099-12-31
+  - id: CVE-2026-85091   # gz_vacate()
+    statement: 'test fixture: gzip file output is never used'
+    expired_at: 2099-12-31
+    purls: ["pkg:apk/alpine/zlib@1.3.1-r2?arch=x86_64&distro=3.22.0"]

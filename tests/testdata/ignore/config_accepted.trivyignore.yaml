@@ -1,0 +1,13 @@
+misconfigurations:
+  - id: KSV-0017
+    statement: test fixture - the agent needs host access
+    expired_at: 2099-12-31
+    paths:
+      - "tests/testdata/config/k8s/privileged.yaml"
+  - id: KSV-0014
+    statement: test fixture - the agent writes to its root file system
+    expired_at: 2099-12-31
+    paths: ["tests/testdata/config/k8s/privileged.yaml"]
+  - id: KSV-0118
+    statement: test fixture
+    expired_at: 2099-12-31

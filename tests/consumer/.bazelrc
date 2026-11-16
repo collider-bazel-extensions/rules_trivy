@@ -1,0 +1,4 @@
+# This repository's tests must pass with no network in the sandbox: the
+# scans read only the pinned, pre-fetched DB and checks bundle.
+# //tests:network_blocked_test checks that this is in effect.
+test --sandbox_default_allow_network=false

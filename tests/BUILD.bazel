@@ -1,0 +1,421 @@
+"""Tests for rules_trivy. Every scan runs offline against the pinned data
+(.bazelrc: --sandbox_default_allow_network=false; network_blocked_test
+checks that holds). Targets tagged `manual` fail on purpose and are run by
+an expect_test, which checks how they fail."""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(
+    "//:defs.bzl",
+    "trivy_config_test",
+    "trivy_ignore_test",
+    "trivy_image_test",
+)
+load(":analysis_tests.bzl", "analysis_test_suite")
+load(":expect.bzl", "expect_test")
+
+exports_files(["expect_test.sh"])
+
+_IGN = "//tests/testdata/ignore:"
+
+_CFG = "//tests/testdata/config:"
+
+# ---- trivy_image_test -----------------------------------------------------------
+
+# A vulnerable input fails: zlib 1.3.1-r2 has two HIGH (and two MEDIUM) CVEs.
+trivy_image_test(
+    name = "vulnerable_image_scan",
+    image = "//tests/images:vulnerable",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "vulnerable_image_test",
+    exit_code = 1,
+    junit_failures = 2,
+    patterns = [
+        "2 finding\\(s\\) at or above HIGH in tests/images/vulnerable:",
+        "HIGH +CVE-2026-22184 +zlib 1.3.1-r2 \\(fixed: 1.3.2-r0\\)",
+        "HIGH +CVE-2026-85091 +zlib 1.3.1-r2 \\(fixed: 1.3.2-r1\\)",
+        "below HIGH \\(not failing\\): 2 MEDIUM",
+        "db +ghcr.io/aquasecurity/trivy-db@sha256:[0-9a-f]{12} \\(built 20[0-9-]+T[0-9:]+Z, [0-9]+ days? old\\)",
+    ],
+    target = ":vulnerable_image_scan",
+)
+
+# A clean one passes, even at the lowest threshold.
+trivy_image_test(
+    name = "clean_image_test",
+    image = "//tests/images:clean",
+    severity = "UNKNOWN",
+)
+
+# The severity threshold: the same image passes at CRITICAL ...
+trivy_image_test(
+    name = "severity_critical_test",
+    image = "//tests/images:vulnerable",
+    severity = "CRITICAL",
+)
+
+# ... and fails with all four at MEDIUM.
+trivy_image_test(
+    name = "severity_medium_scan",
+    image = "//tests/images:vulnerable",
+    severity = "MEDIUM",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "severity_medium_test",
+    exit_code = 1,
+    junit_failures = 4,
+    patterns = [
+        "4 finding\\(s\\) at or above MEDIUM",
+        "MEDIUM +CVE-2026-27171",
+        "MEDIUM +CVE-2026-4738",
+        "!below MEDIUM",
+    ],
+    target = ":severity_medium_scan",
+)
+
+# Ignored findings pass: both HIGHs accepted (one matched by purl).
+trivy_image_test(
+    name = "ignored_image_test",
+    ignore = _IGN + "image_accepted.trivyignore.yaml",
+    image = "//tests/images:vulnerable",
+)
+
+expect_test(
+    name = "ignored_image_output_test",
+    exit_code = 0,
+    junit_failures = 0,
+    patterns = [
+        "ignored by tests/testdata/ignore/image_accepted.trivyignore.yaml:",
+        "CVE-2026-22184 +test fixture: the image never decompresses untrusted input",
+        "CVE-2026-85091 +test fixture: gzip file output is never used",
+        "!matched nothing",
+        "PASS: no findings at or above HIGH",
+    ],
+    target = ":ignored_image_test",
+)
+
+# An expired ignore entry fails, naming it, even though the other entry is fine.
+trivy_image_test(
+    name = "expired_ignore_scan",
+    ignore = _IGN + "image_expired.trivyignore.yaml",
+    image = "//tests/images:vulnerable",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "expired_ignore_test",
+    exit_code = 1,
+    patterns = [
+        "ignore file tests/testdata/ignore/image_expired.trivyignore.yaml: 1 expired entry:",
+        "vulnerabilities\\[0\\] \\(CVE-2026-22184\\): expired_at 2020-01-01",
+        "!CVE-2026-85091",
+    ],
+    target = ":expired_ignore_scan",
+)
+
+# A malformed ignore file fails the scan clearly (exit 2, before scanning).
+trivy_image_test(
+    name = "malformed_ignore_scan",
+    ignore = _IGN + "reason_key.yaml",
+    image = "//tests/images:clean",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "malformed_ignore_test",
+    exit_code = 2,
+    patterns = [
+        "ignore file tests/testdata/ignore/reason_key.yaml is malformed:",
+        "unknown key 'reason' -- the reason goes in 'statement'",
+        "Each entry needs id, statement \\(the reason\\) and expired_at",
+    ],
+    target = ":malformed_ignore_scan",
+)
+
+# The oci_load tarball form of the same image finds the same.
+trivy_image_test(
+    name = "tarball_image_scan",
+    image = "//tests/images:vulnerable_tarball",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "tarball_image_test",
+    exit_code = 1,
+    junit_failures = 2,
+    patterns = ["2 finding\\(s\\) at or above HIGH in tests/images/vulnerable_load/tarball.tar:"],
+    target = ":tarball_image_scan",
+)
+
+# ignore_unfixed leaves out findings with no fix: zlib's all have one.
+trivy_image_test(
+    name = "ignore_unfixed_scan",
+    ignore_unfixed = True,
+    image = "//tests/images:vulnerable",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "ignore_unfixed_test",
+    exit_code = 1,
+    junit_failures = 2,
+    target = ":ignore_unfixed_scan",
+)
+
+# A multi-platform index: `platform` picks the image to scan.
+trivy_image_test(
+    name = "index_arm64_test",
+    image = "//tests/images:multiarch",
+    platform = "linux/arm64",
+)
+
+trivy_image_test(
+    name = "index_amd64_scan",
+    image = "//tests/images:multiarch",
+    platform = "linux/amd64",
+    tags = ["manual"],
+)
+
+trivy_image_test(
+    name = "index_no_platform_scan",
+    image = "//tests/images:multiarch",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "index_no_platform_test",
+    exit_code = 2,
+    patterns = ["a multi-platform index \\(linux/arm64, linux/amd64\\): set `platform`"],
+    target = ":index_no_platform_scan",
+)
+
+expect_test(
+    name = "index_amd64_test",
+    exit_code = 1,
+    junit_failures = 2,
+    patterns = ["HIGH +CVE-2026-22184"],
+    target = ":index_amd64_scan",
+)
+
+# Jars without the Java DB: Trivy refuses, and the test says what to do.
+trivy_image_test(
+    name = "java_without_db_scan",
+    image = "//tests/images:java",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "java_without_db_test",
+    exit_code = 2,
+    patterns = ["set `java_db = \"@rules_trivy//:java_db\"`"],
+    target = ":java_without_db_scan",
+)
+
+# With the Java DB (~1 GB download, so `manual`; CI runs java_db_test).
+trivy_image_test(
+    name = "java_scan",
+    image = "//tests/images:java",
+    java_db = "//:java_db",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "java_db_test",
+    exit_code = 1,
+    patterns = [
+        "CRITICAL +CVE-2021-44228 +org.apache.logging.log4j:log4j-core 2.14.1",
+        "java_db +ghcr.io/aquasecurity/trivy-java-db@sha256:",
+    ],
+    tags = ["manual"],
+    target = ":java_scan",
+)
+
+# ---- trivy_config_test ----------------------------------------------------------
+
+# A stand-in for a Helm / Kustomize render: any rule's output is scanned
+# under its workspace path.
+genrule(
+    name = "rendered",
+    srcs = ["//tests/testdata/config:k8s/deployment.yaml.tmpl"],
+    outs = ["rendered/deployment.yaml"],
+    cmd = "sed 's/PRIVILEGED/true/' $< > $@",
+)
+
+trivy_config_test(
+    name = "misconfigured_scan",
+    srcs = [
+        ":rendered",
+        _CFG + "docker/Dockerfile",
+        _CFG + "k8s/privileged.yaml",
+        _CFG + "terraform/main.tf",
+    ],
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "misconfigured_test",
+    exit_code = 1,
+    patterns = [
+        "HIGH +KSV-0017 +tests/rendered/deployment.yaml:[0-9]+ +Privileged",
+        "HIGH +KSV-0017 +tests/testdata/config/k8s/privileged.yaml:[0-9]+ +Privileged",
+        "HIGH +DS-0002 +tests/testdata/config/docker/Dockerfile",
+        "HIGH +AWS-0092 +tests/testdata/config/terraform/main.tf:[0-9]+",
+        "checks +ghcr.io/aquasecurity/trivy-checks@sha256:[0-9a-f]{12} v[0-9.]+",
+    ],
+    target = ":misconfigured_scan",
+)
+
+trivy_config_test(
+    name = "hardened_config_test",
+    srcs = [_CFG + "k8s/hardened.yaml"],
+)
+
+# The threshold applies to misconfigurations too: hardened.yaml has one MEDIUM.
+trivy_config_test(
+    name = "hardened_medium_scan",
+    srcs = [_CFG + "k8s/hardened.yaml"],
+    severity = "MEDIUM",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "hardened_medium_test",
+    exit_code = 1,
+    junit_failures = 1,
+    patterns = ["MEDIUM +KSV-0125 +tests/testdata/config/k8s/hardened.yaml"],
+    target = ":hardened_medium_scan",
+)
+
+trivy_config_test(
+    name = "ignored_config_test",
+    srcs = [_CFG + "k8s/privileged.yaml"],
+    ignore = _IGN + "config_accepted.trivyignore.yaml",
+)
+
+trivy_config_test(
+    name = "expired_config_scan",
+    srcs = [_CFG + "k8s/privileged.yaml"],
+    ignore = _IGN + "config_expired.trivyignore.yaml",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "expired_config_test",
+    exit_code = 1,
+    patterns = ["misconfigurations\\[0\\] \\(KSV-0017\\): expired_at 2021-06-30"],
+    target = ":expired_config_scan",
+)
+
+# A remote Terraform module is never downloaded; the test says so.
+trivy_config_test(
+    name = "remote_module_test",
+    srcs = [_CFG + "terraform_remote/main.tf"],
+)
+
+expect_test(
+    name = "remote_module_note_test",
+    exit_code = 0,
+    patterns = [
+        "NOTE: .*Failed to load module",
+        "NOTE: remote Terraform modules are never downloaded in a test",
+    ],
+    target = ":remote_module_test",
+)
+
+# Nothing Trivy recognises: an error, not a silent pass.
+trivy_config_test(
+    name = "unrecognised_scan",
+    srcs = [_CFG + "notes.txt"],
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "unrecognised_test",
+    exit_code = 2,
+    patterns = ["Trivy recognised no configuration in srcs \\(1 file\\(s\\)\\): nothing was checked"],
+    target = ":unrecognised_scan",
+)
+
+# ---- trivy_ignore_test -----------------------------------------------------------
+
+[trivy_ignore_test(
+    name = "ignore_" + name + "_test",
+    src = _IGN + name + (".yaml" if error else ".trivyignore.yaml"),
+    expect_error = error,
+) for name, error in [
+    ("image_accepted", ""),
+    ("config_accepted", ""),
+    ("empty", ""),
+    ("missing_statement", "vulnerabilities\\[0\\] \\(CVE-2026-22184\\): 'statement' is missing or empty"),
+    ("missing_expiry", "vulnerabilities\\[0\\] \\(CVE-2026-22184\\): 'expired_at' is missing"),
+    ("bad_date", "expired_at 'next year' is not a date \\(YYYY-MM-DD\\)"),
+    ("impossible_date", "expired_at '2099-02-30' is not a date"),
+    ("reason_key", "unknown key 'reason' -- the reason goes in 'statement'"),
+    ("tab", "line 3: tab in indentation"),
+    ("anchor", "line 2: unsupported YAML \\('&'\\)"),
+    ("block_scalar", "line 3: unsupported YAML \\('\\|'\\)"),
+    ("top_level_list", "expected a mapping with `vulnerabilities:`"),
+    ("not_a_list", "vulnerabilities: expected a list of entries"),
+    ("secrets", "unknown section 'secrets' -- rules_trivy scans don't report secrets"),
+    ("empty_paths", "'paths' must be a non-empty list of strings"),
+    ("bad_indent", "line 5: unexpected indentation"),
+]]
+
+[trivy_ignore_test(
+    name = "ignore_" + name + "_test",
+    src = _IGN + name + ".trivyignore.yaml",
+    expect_error = error,
+) for name, error in [
+    ("image_expired", "1 expired entry:\n  vulnerabilities\\[0\\] \\(CVE-2026-22184\\): expired_at 2020-01-01"),
+    ("config_expired", "misconfigurations\\[0\\] \\(KSV-0017\\): expired_at 2021-06-30"),
+]]
+
+# ---- data, pins, sandbox -----------------------------------------------------------
+
+sh_test(
+    name = "checksums_test",
+    srcs = ["checksums_test.sh"],
+    data = ["//private:versions.bzl"],
+)
+
+sh_test(
+    name = "data_pins_test",
+    srcs = ["data_pins_test.sh"],
+    args = ["$(rootpath //private:versions.bzl)"],
+    data = ["//private:versions.bzl"],
+)
+
+sh_test(
+    name = "version_test",
+    srcs = ["version_test.sh"],
+    args = [
+        "$(rootpath //private:versions.bzl)",
+        "$(rootpath //:MODULE.bazel)",
+        "$(rootpath //toolchain:current)",
+    ],
+    data = [
+        "//:MODULE.bazel",
+        "//private:versions.bzl",
+        "//toolchain:current",
+    ],
+)
+
+# `bazel run //:db_info` prints the pinned DB's digest and age.
+sh_test(
+    name = "db_info_test",
+    srcs = ["db_info_test.sh"],
+    args = ["$(rootpath //:db_info)"],
+    data = ["//:db_info"],
+)
+
+# The sandbox has no network (.bazelrc), so the scans above ran offline.
+sh_test(
+    name = "network_blocked_test",
+    srcs = ["network_blocked_test.sh"],
+)
+
+analysis_test_suite(name = "analysis_tests")

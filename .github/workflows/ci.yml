@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: bazel test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+
+      # .bazelrc: --sandbox_default_allow_network=false, so every scan runs
+      # offline on the pinned data (//tests:network_blocked_test checks it).
+      - name: bazel test //tests/...
+        run: bazel test //tests/... --test_output=errors
+
+      - name: The Java DB (~1 GB download)
+        run: bazel test //tests:java_db_test --test_output=errors
+
+      - name: A consumer module (external labels, a rules_oci image)
+        working-directory: tests/consumer
+        run: bazel test //... --test_output=errors
+
+      - name: The pinned binaries match upstream's published checksums
+        run: tools/update_versions.sh --check
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-testlogs
+          path: bazel-testlogs/
+          if-no-files-found: ignore
+
+  consumer:
+    # The release archive (git archive honours .gitattributes export-ignore,
+    # as GitHub's tag tarballs do) must load with //... for a consumer, and
+    # the extension's tags must resolve as documented.
+    name: consumer (ubuntu-latest, git archive)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      - name: Consumer check
+        run: .github/consumer/check.sh "$RUNNER_TEMP/consumer"

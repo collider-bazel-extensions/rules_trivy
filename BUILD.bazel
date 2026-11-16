@@ -1,0 +1,48 @@
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("//private:info.bzl", "trivy_db_info", "trivy_db_latest")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "MODULE.bazel",
+    "defs.bzl",
+])
+
+# The pinned data artifacts (at the root module's trivy.db() / java_db() /
+# checks() pins, else rules_trivy's). Each downloads only when a build needs it.
+alias(
+    name = "db",
+    actual = "@trivy_db//:data",
+)
+
+alias(
+    name = "java_db",
+    actual = "@trivy_java_db//:data",
+)
+
+alias(
+    name = "checks",
+    actual = "@trivy_checks//:data",
+)
+
+# `bazel run @rules_trivy//:db_info`: the pinned DB and checks bundle, and their age.
+trivy_db_info(
+    name = "db_info",
+    data = [
+        ":checks",
+        ":db",
+    ],
+)
+
+# `bazel run @rules_trivy//:db_latest`: the upstream digests to bump to (network).
+trivy_db_latest(name = "db_latest")
+
+bzl_library(
+    name = "defs",
+    srcs = ["defs.bzl"],
+    deps = [
+        "//private:info",
+        "//private:providers",
+        "//private:test",
+    ],
+)

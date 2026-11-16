@@ -49,7 +49,8 @@ rules_trivy/
     ├── testdata/config/      # k8s hardened/privileged/template, Dockerfile, terraform, remote module, notes.txt
     ├── testdata/ignore/      # accepted/expired/empty ignore files + one malformed file per error
     ├── consumer/             # separate consumer module (external labels, rules_oci image; CI)
-    └── checksums_test.sh, data_pins_test.sh, version_test.sh, db_info_test.sh, network_blocked_test.sh
+    └── checksums_test.sh, data_pins_test.sh, version_test.sh, db_info_test.sh, network_blocked_test.sh,
+        missing_input_test.sh (a scan with one input removed from a runfiles copy fails naming it)
 ```
 
 ## Key concepts

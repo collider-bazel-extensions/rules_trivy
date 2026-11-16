@@ -326,12 +326,40 @@ def utc_today():
     return datetime.datetime.now(datetime.timezone.utc).date()
 
 
+class MissingInput(Exception):
+    pass
+
+
+def require(short, what):
+    """The runfile at `short`, or MissingInput naming it (as `what`)."""
+    path = runfile(short)
+    if not os.path.exists(path):  # False for a dangling link, too
+        raise MissingInput("{} is missing: {}".format(what, workspace_path(short)))
+    return path
+
+
+# Per data kind: its name in messages, and the files in its cache_dir (as
+# DATA_KINDS in private/versions.bzl).
+DATA_FILES = {
+    "db": ("vulnerability DB", ["trivy.db", "metadata.json"]),
+    "java_db": ("Java DB", ["trivy-java.db", "metadata.json"]),
+    "checks": ("checks bundle", ["bundle.tar.gz"]),
+}
+
+
 def data_info(info_short):
-    info_path = runfile(info_short)
+    info_path = require(info_short, "a pinned data artifact's info.json")
     with open(info_path) as f:
         info = json.load(f)
     info["_root"] = os.path.dirname(info_path)
     return info
+
+
+def require_data(info_short, info):
+    """The cache files a scan reads (db-info has only the info.json)."""
+    what, files = DATA_FILES.get(info.get("kind"), (info.get("kind"), []))
+    for name in files:
+        require(os.path.join(os.path.dirname(info_short), info["cache_dir"], name), "the " + what)
 
 
 def age_text(info):
@@ -593,8 +621,34 @@ def stage_layout(src, dest, platform):
     return dest
 
 
+def check_inputs(a, kind):
+    """Every input the scan reads, before Trivy runs: -> the data infos;
+    MissingInput names the first one missing."""
+    require(a.trivy, "the Trivy binary")
+    if kind == "image":
+        require(a.image, "the image")
+    else:
+        with open(require(a.manifest, "the srcs manifest")) as f:
+            for line in f:
+                if line.strip():
+                    require(line.rstrip("\n"), "a src")
+    if a.ignore:
+        require(a.ignore, "the ignore file")
+    infos = []
+    for short in a.data:
+        info = data_info(short)
+        require_data(short, info)
+        infos.append(info)
+    return infos
+
+
 def scan(a, kind):
     label = a.label
+    try:
+        infos = check_inputs(a, kind)
+    except MissingInput as e:
+        print("trivy {}: {} (not in the test's runfiles)".format(label, e), file=sys.stderr)
+        return 2
     tmp = tempfile.mkdtemp(prefix="trivy.", dir=os.environ.get("TEST_TMPDIR"))
     threshold = a.severity.upper()
     print("trivy {}: Trivy {}, fails on {} and above".format(label, a.version, threshold))
@@ -620,7 +674,6 @@ def scan(a, kind):
         with open(ignorefile, "w") as f:
             f.write(trivy_ignore_yaml(sections))
 
-    infos = [data_info(i) for i in a.data]
     for info in infos:
         print("  {:8} {}".format(info["kind"], describe(info)))
     cache = os.path.join(tmp, "cache")
@@ -859,15 +912,19 @@ def main(argv):
     p.add_argument("--expect-error", default="")
     p.add_argument("extra", nargs="*")
     a = p.parse_args(argv)
-    if a.mode in ("image", "config"):
-        return scan(a, a.mode)
-    if a.mode == "check-ignore":
-        return check_ignore(a)
-    if a.mode == "ignore-test":
-        return ignore_test(a)
-    if a.mode == "db-info":
-        return db_info(a)
-    return latest(a)
+    try:
+        if a.mode in ("image", "config"):
+            return scan(a, a.mode)
+        if a.mode == "check-ignore":
+            return check_ignore(a)
+        if a.mode == "ignore-test":
+            return ignore_test(a)
+        if a.mode == "db-info":
+            return db_info(a)
+        return latest(a)
+    except MissingInput as e:
+        print("rules_trivy {}: {} (not in the runfiles)".format(a.label or a.mode, e), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -374,6 +374,22 @@ expect_test(
     ("config_expired", "misconfigurations\\[0\\] \\(KSV-0017\\): expired_at 2021-06-30"),
 ]]
 
+# A missing input (image, data artifact, src, ignore file) fails naming it.
+sh_test(
+    name = "missing_input_test",
+    srcs = ["missing_input_test.sh"],
+    args = [
+        "$(rootpath :clean_image_test)",
+        "$(rootpath :tarball_image_scan)",
+        "$(rootpath :ignored_config_test)",
+    ],
+    data = [
+        ":clean_image_test",
+        ":ignored_config_test",
+        ":tarball_image_scan",
+    ],
+)
+
 # ---- data, pins, sandbox -----------------------------------------------------------
 
 sh_test(

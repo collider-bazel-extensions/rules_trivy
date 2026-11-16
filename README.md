@@ -80,6 +80,7 @@ Fix them, or accept one in the ignore file (`ignore`) with a statement and an ex
   The layout is staged as real files: Trivy refuses symlinked blobs, which rules_oci creates.
 - **Offline:** Trivy runs with `--skip-db-update --skip-java-db-update --offline-scan` against the pinned DB.
 - **Severity:** findings below `severity` are counted in the log but don't fail.
+- **Missing inputs:** before Trivy runs, the test checks the image, the pinned DB and checks bundle, `srcs` and the ignore file are in its runfiles. A missing one fails (exit 2) with one line naming it, e.g. `the vulnerability DB is missing: external/+trivy+trivy_db/db/trivy.db`.
 - **Java:** an image with `.jar`/`.war`/`.ear` files needs the Java DB. Without it, Trivy refuses to scan and the test says so. Add `java_db = "@rules_trivy//:java_db"`.
 - **Reports:**
   - JUnit goes to `$XML_OUTPUT_FILE`, one failing test case per finding;

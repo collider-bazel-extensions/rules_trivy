@@ -19,7 +19,7 @@ archive_override(
     module_name = "rules_trivy",
     urls = ["https://github.com/collider-bazel-extensions/rules_trivy/archive/refs/tags/v0.2.0.tar.gz"],
     strip_prefix = "rules_trivy-0.2.0",
-    integrity = "sha256-4gtky1RIJWSZh7ntj6LThkPbdYlE8J1HeZWtWP2Ywpg=",
+    integrity = "sha256-TKMRuvZGeCDei6tPkdWknlxQ3EqFqZhCG+l5OjQa/40=",
 )
 ```
 

@@ -1,0 +1,5 @@
+licenses:
+  - id: GPL-3.0-only
+    packages: gpl-thing
+    statement: packages must be a list
+    expired_at: 2099-12-31

@@ -4,12 +4,14 @@
 Modes:
   image         trivy image --input <OCI layout dir | image tarball>, offline
   config        trivy config over staged srcs, offline
+  license       trivy's licence scanner over an image or staged srcs, offline,
+                checked against an allowlist
   check-ignore  validate an ignore file (shape, reasons, expiry) and exit
   db-info       print the pinned data artifacts and their age
   latest        resolve the upstream tags to digests (network; bazel run only)
 
-Exit codes: 0 pass, 1 findings at or above the threshold (or an expired
-ignore entry), 2 rules_trivy or Trivy failed (bad ignore file, Trivy error).
+Exit codes: 0 pass, 1 findings at or above the threshold, licences outside
+the allowlist (or an expired ignore entry), 2 rules_trivy or Trivy failed (bad ignore file, Trivy error).
 
 Paths given with --runfiles are runfiles short paths (`pkg/f` in the main
 repository, `../repo/f` in another), resolved against $RUNFILES_DIR.
@@ -17,6 +19,7 @@ repository, `../repo/f` in another), resolved against $RUNFILES_DIR.
 
 import argparse
 import datetime
+import fnmatch
 import json
 import os
 import re
@@ -217,6 +220,10 @@ def _mapping(lines, i, indent):
 _SECTIONS = {
     "vulnerabilities": ("id", "statement", "expired_at", "paths", "purls"),
     "misconfigurations": ("id", "statement", "expired_at", "paths"),
+    # Applied by rules_trivy, not Trivy: id is the licence (as Trivy names
+    # it, or NOASSERTION for a package without one); packages narrows it to
+    # `name` or `name@version`, paths to file paths (globs).
+    "licenses": ("id", "statement", "expired_at", "paths", "packages"),
 }
 _HINTS = {
     "reason": "the reason goes in 'statement' (Trivy's key)",
@@ -226,7 +233,7 @@ _HINTS = {
     "expires_at": "the expiry goes in 'expired_at' (Trivy's key)",
     "expiration": "the expiry goes in 'expired_at' (Trivy's key)",
     "secrets": "rules_trivy scans don't report secrets",
-    "licenses": "rules_trivy scans don't report licenses",
+    "license": "the section is 'licenses'",
 }
 
 
@@ -252,7 +259,7 @@ def load_ignore(path, shown, today):
     if doc is None:
         return {}, []
     if not isinstance(doc, dict):
-        raise IgnoreError("expected a mapping with `vulnerabilities:` and/or `misconfigurations:` lists")
+        raise IgnoreError("expected a mapping with `vulnerabilities:`, `misconfigurations:` and/or `licenses:` lists")
     problems, sections, expired = [], {}, []
     for key, entries in doc.items():
         if key not in _SECTIONS:
@@ -288,7 +295,7 @@ def load_ignore(path, shown, today):
                 problems.append("{}: 'expired_at' is missing (YYYY-MM-DD: when to review it again)".format(where))
             elif _date(e["expired_at"]) is None:
                 problems.append("{}: expired_at {!r} is not a date (YYYY-MM-DD)".format(where, e["expired_at"]))
-            for k in ("paths", "purls"):
+            for k in ("paths", "purls", "packages"):
                 if k in e and k in known and not (
                         isinstance(e[k], list) and e[k] and all(isinstance(x, str) and x for x in e[k])):
                     problems.append("{}: '{}' must be a non-empty list of strings".format(where, k))
@@ -304,9 +311,12 @@ def load_ignore(path, shown, today):
 def trivy_ignore_yaml(sections):
     """The validated, unexpired entries in Trivy's schema, as JSON (which
     is YAML), so Trivy applies exactly what was checked here. expired_at is
-    dropped: expiry was already enforced."""
+    dropped: expiry was already enforced. `licenses` is left out: rules_trivy
+    applies it."""
     out = {}
     for key, entries in sections.items():
+        if key == "licenses":
+            continue
         out[key] = [{k: v for k, v in e.items() if k != "expired_at"} for e in entries]
     return json.dumps(out, indent=1) + "\n"
 
@@ -513,7 +523,7 @@ def suppressed(report):
     return out
 
 
-def write_junit(path, suite, failing, threshold):
+def write_junit(path, suite, failing, threshold, passed=None):
     cases = []
     for f in failing:
         name = "{} {}".format(f["id"], f["what"])
@@ -522,7 +532,7 @@ def write_junit(path, suite, failing, threshold):
             quoteattr(suite), quoteattr(name), quoteattr(msg), escape(f["target"])))
     if not cases:
         cases.append('  <testcase classname={} name={}/>'.format(
-            quoteattr(suite), quoteattr("no findings at or above " + threshold)))
+            quoteattr(suite), quoteattr(passed or "no findings at or above " + threshold)))
     with open(path, "w") as out:
         out.write('<?xml version="1.0" encoding="UTF-8"?>\n<testsuites>\n')
         out.write('<testsuite name={} tests="{}" failures="{}">\n'.format(
@@ -625,7 +635,7 @@ def check_inputs(a, kind):
     """Every input the scan reads, before Trivy runs: -> the data infos;
     MissingInput names the first one missing."""
     require(a.trivy, "the Trivy binary")
-    if kind == "image":
+    if kind == "image" or (kind == "license" and a.image):
         require(a.image, "the image")
     else:
         with open(require(a.manifest, "the srcs manifest")) as f:
@@ -634,6 +644,8 @@ def check_inputs(a, kind):
                     require(line.rstrip("\n"), "a src")
     if a.ignore:
         require(a.ignore, "the ignore file")
+    if a.allowlist:
+        require(a.allowlist, "the allowlist")
     infos = []
     for short in a.data:
         info = data_info(short)
@@ -755,12 +767,13 @@ def scan(a, kind):
         for fid, statement, _ in sorted(set(sup)):
             print("    {}  {}".format(fid, statement))
     if a.ignore and kind == "config":
-        print("  ignore file {}: {} entr{} applied".format(
-            shown, sum(len(v) for v in sections.values()),
-            "y" if sum(len(v) for v in sections.values()) == 1 else "ies"))
+        n = len(sections.get("misconfigurations", []))
+        print("  ignore file {}: {} entr{} applied".format(shown, n, "y" if n == 1 else "ies"))
     if a.ignore and kind == "image":
         used = {fid for fid, _, _ in sup}
         for key, entries in sections.items():
+            if key != "vulnerabilities":
+                continue
             for e in entries:
                 if e["id"] not in used:
                     print("  note: ignore entry {} ({}) matched nothing".format(e["id"], key))
@@ -780,6 +793,389 @@ def scan(a, kind):
         print("  {:8}  {:16}  {}  {}".format(f["severity"], f["id"], f["what"], f["title"][:80]), file=sys.stderr)
     print("Fix them, or accept one in the ignore file (`ignore`) with a statement and an expired_at.",
           file=sys.stderr)
+    return 1
+
+
+# ---- licence scan --------------------------------------------------------------------
+
+# Trivy's licence categories (Google's licence classification), most to least
+# restrictive. OR in an expression takes its least restrictive operand's
+# category, AND its most restrictive; WITH, and names Trivy doesn't know,
+# are "unknown".
+CATEGORIES = ["forbidden", "restricted", "reciprocal", "notice", "permissive", "unencumbered", "unknown"]
+
+# A package Trivy found no licence for (SPDX's name for "none found").
+NOASSERTION = "NOASSERTION"
+
+_JAVA_ARCHIVE = re.compile(r"\.(jar|war|ear|par)$")
+
+
+class PolicyError(Exception):
+    pass
+
+
+def load_allowlist(path, shown):
+    """-> (names, categories). One licence per line, or `category: <name>`;
+    `#` starts a comment."""
+    names, cats, problems = [], [], []
+    with open(path, encoding="utf-8") as f:
+        for n, raw in enumerate(f, 1):
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            m = re.match(r"^category\s*:\s*(\S+)$", line)
+            if m:
+                if m.group(1) not in CATEGORIES:
+                    problems.append("line {}: unknown category {!r} (Trivy's: {})".format(
+                        n, m.group(1), ", ".join(CATEGORIES)))
+                cats.append(m.group(1))
+            elif line.startswith("category"):
+                problems.append("line {}: expected `category: <name>`, got {!r}".format(n, line))
+            else:
+                names.append(line)
+    if problems:
+        raise PolicyError("allowlist {}:\n{}".format(shown, "\n".join("  " + p for p in problems)))
+    return names, cats
+
+
+def _spdx_tokens(text):
+    return [t for t in re.split(r"(\(|\)|\s+)", text) if t and not t.isspace()]
+
+
+def _spdx_parse(tokens):
+    """An SPDX licence expression -> ("or"|"and", [nodes]) | ("id", name), or
+    None if it isn't one (then the whole text is one name)."""
+    pos = [0]
+
+    def peek():
+        return tokens[pos[0]] if pos[0] < len(tokens) else None
+
+    def take():
+        pos[0] += 1
+        return tokens[pos[0] - 1]
+
+    def expr(op="OR"):
+        sub = (lambda: expr("AND")) if op == "OR" else atom
+        nodes = [sub()]
+        while peek() == op:
+            take()
+            nodes.append(sub())
+        return nodes[0] if len(nodes) == 1 else (op.lower(), nodes)
+
+    def atom():
+        t = peek()
+        if t == "(":
+            take()
+            node = expr()
+            if take() != ")":
+                raise ValueError
+            return node
+        if t is None or t in ("AND", "OR", "WITH", ")"):
+            raise ValueError
+        name = take()
+        if peek() == "WITH":
+            take()
+            exc = take() if peek() not in (None, "AND", "OR", "WITH", "(", ")") else None
+            if exc is None:
+                raise ValueError
+            name += " WITH " + exc
+        return ("id", name)
+
+    try:
+        node = expr()
+        if pos[0] != len(tokens):
+            return None
+        return node
+    except (ValueError, IndexError):
+        return None
+
+
+def names_allow(name, allowed):
+    """Whether `allow` alone admits licence `name`: listed itself, or an SPDX
+    expression whose every AND operand / some OR operand is listed."""
+    if name.lower() in allowed:
+        return True
+    node = _spdx_parse(_spdx_tokens(name))
+
+    def ok(n):
+        if n[0] == "id":
+            return n[1].lower() in allowed
+        return any(map(ok, n[1])) if n[0] == "or" else all(map(ok, n[1]))
+    return node is not None and node[0] != "id" and ok(node)
+
+
+def license_findings(report):
+    """-> [{license, category, pkg, version, path}] for every package licence
+    (NOASSERTION where a package has none) and licence file in the report."""
+    cats, by_name = {}, {}
+    for res in report.get("Results") or []:
+        if res.get("Class") == "license":
+            for l in res.get("Licenses") or []:
+                cats[(l.get("PkgName") or "", l.get("Name") or "")] = l.get("Category") or "unknown"
+                by_name.setdefault(l.get("Name") or "", l.get("Category") or "unknown")
+    out = []
+    for res in report.get("Results") or []:
+        cls, target = res.get("Class"), res.get("Target", "")
+        for p in res.get("Packages") or []:
+            path = p.get("FilePath") or (target if cls == "lang-pkgs" else "")
+            base = {"pkg": p.get("Name", "?"), "version": p.get("Version", ""), "path": path}
+            lics = [l for l in p.get("Licenses") or [] if l]
+            if not lics:
+                out.append(dict(base, license=NOASSERTION, category="unknown"))
+            for l in lics:
+                out.append(dict(base, license=l, category=cats.get((base["pkg"], l), by_name.get(l, "unknown"))))
+        if cls == "license-file":
+            for l in res.get("Licenses") or []:
+                out.append({"pkg": "", "version": "", "path": l.get("FilePath") or target,
+                            "license": l.get("Name") or "?", "category": l.get("Category") or "unknown"})
+    return out
+
+
+def finding_text(f):
+    who = "{} {}".format(f["pkg"], f["version"]).strip() if f["pkg"] else "licence file"
+    return who + ("  ({})".format(f["path"]) if f["path"] else "")
+
+
+def ignore_match(e, f):
+    if e["id"].lower() != f["license"].lower():
+        return False
+    if "packages" in e and not any(x in (f["pkg"], "{}@{}".format(f["pkg"], f["version"])) for x in e["packages"]):
+        return False
+    if "paths" in e and not any(fnmatch.fnmatchcase(f["path"], x) for x in e["paths"]):
+        return False
+    return True
+
+
+def _layers(image):
+    """Yield an open tarfile per layer of `image` (a staged OCI layout with
+    one manifest, or an image tarball), in order."""
+    if os.path.isdir(image):
+        def blob(d):
+            return os.path.join(image, "blobs", *d.split(":", 1))
+        with open(os.path.join(image, "index.json")) as f:
+            desc = json.load(f)["manifests"][0]
+        with open(blob(desc["digest"])) as f:
+            layers = [l["digest"] for l in json.load(f).get("layers") or []]
+        for d in layers:
+            with tarfile.open(blob(d), "r|*") as t:
+                yield t
+        return
+    with tarfile.open(image) as outer:
+        names = outer.getnames()
+        if "manifest.json" in names:
+            layers = json.load(outer.extractfile("manifest.json"))[0].get("Layers") or []
+        else:  # an OCI layout as a tarball
+            idx = json.load(outer.extractfile("index.json"))
+            man = json.load(outer.extractfile("blobs/" + "/".join(idx["manifests"][0]["digest"].split(":", 1))))
+            layers = ["blobs/" + "/".join(l["digest"].split(":", 1)) for l in man.get("layers") or []]
+        for name in layers:
+            with tarfile.open(fileobj=outer.extractfile(name), mode="r|*") as t:
+                yield t
+
+
+def java_archives(image):
+    """The Java archives in the image's final file system (whiteouts applied)."""
+    files = set()
+    for t in _layers(image):
+        added, gone, opaque = set(), set(), set()
+        for m in t:
+            path = re.sub(r"^(\./)+", "", m.name).strip("/")
+            d, base = os.path.split(path)
+            if base == ".wh..wh..opq":
+                opaque.add(d)
+            elif base.startswith(".wh."):
+                gone.add(os.path.join(d, base[4:]))
+            elif m.isfile() and _JAVA_ARCHIVE.search(base):
+                added.add(path)
+        # A layer's whiteouts hide what the layers below it have.
+        files = {x for x in files
+                 if not any(x == g or x.startswith(g + "/") for g in gone)
+                 and not any(x.startswith(d + "/") or not d for d in opaque)}
+        files |= added
+    return sorted(files)
+
+
+def license_scan(a):
+    label = a.label
+    try:
+        infos = check_inputs(a, "license")
+    except MissingInput as e:
+        print("trivy {}: {} (not in the test's runfiles)".format(label, e), file=sys.stderr)
+        return 2
+    tmp = tempfile.mkdtemp(prefix="trivy.", dir=os.environ.get("TEST_TMPDIR"))
+    print("trivy {}: Trivy {}, licence scan".format(label, a.version))
+
+    names, cats = list(a.allow), list(a.allow_category)
+    if a.allowlist:
+        try:
+            n2, c2 = load_allowlist(runfile(a.allowlist), workspace_path(a.allowlist))
+        except PolicyError as e:
+            print("trivy {}: {}".format(label, e), file=sys.stderr)
+            return 2
+        names += n2
+        cats += c2
+    allowed = {n.lower() for n in names}
+    print("  allowed: categories {}{}".format(", ".join(sorted(set(cats), key=CATEGORIES.index)) or "(none)",
+                                             "; licences " + ", ".join(names) if names else ""))
+
+    entries, shown = [], ""
+    if a.ignore:
+        shown = workspace_path(a.ignore)
+        try:
+            sections, expired = load_ignore(runfile(a.ignore), shown, utc_today())
+        except IgnoreError as e:
+            print("trivy {}: ignore file {} is malformed:\n{}".format(label, shown, e), file=sys.stderr)
+            print("A licence entry needs id (the licence), statement (the reason) and expired_at "
+                  "(YYYY-MM-DD); packages and paths narrow it, e.g.\n"
+                  "  licenses:\n"
+                  "    - id: GPL-3.0-only\n"
+                  "      packages: [gpl-thing]\n"
+                  "      statement: build-time tool only, never shipped\n"
+                  "      expired_at: 2027-03-31", file=sys.stderr)
+            return 2
+        expired = [(w, e) for w, e in expired if w.startswith("licenses[")]
+        if expired:
+            print("trivy {}: {}".format(label, report_expired(shown, expired)), file=sys.stderr)
+            return 1
+        entries = sections.get("licenses", [])
+
+    for info in infos:
+        print("  {:8} {}".format(info["kind"], describe(info)))
+    cache = os.path.join(tmp, "cache")
+    os.makedirs(cache)
+    setup_cache(cache, infos)
+    out_json = os.path.join(tmp, "trivy.json")
+    flags = common_flags(cache, tmp, "", out_json) + ["--list-all-pkgs"]
+    if a.license_full:
+        flags.append("--license-full")
+    java = any(i["kind"] == "java_db" for i in infos)
+
+    if a.image:
+        image = os.path.realpath(runfile(a.image))
+        what = workspace_path(a.image)
+        if os.path.isdir(image):
+            if not os.path.exists(os.path.join(image, "index.json")):
+                print("trivy {}: image {} is a directory without index.json: not an OCI image layout "
+                      "(give an oci_image, or an image tarball)".format(label, what), file=sys.stderr)
+                return 2
+            try:
+                image = stage_layout(image, os.path.join(tmp, "image"), a.platform)
+            except LayoutError as e:
+                print("trivy {}: image {}: {}".format(label, what, e), file=sys.stderr)
+                return 2
+        elif a.platform:
+            print("trivy {}: platform applies to an OCI layout (oci_image_index); {} is a tarball".format(
+                label, what), file=sys.stderr)
+            return 2
+        if not java:
+            try:
+                jars = java_archives(image)
+            except (tarfile.TarError, OSError, KeyError, IndexError, ValueError) as e:
+                print("trivy {}: image {}: cannot list its layers for Java archives: {}".format(label, what, e),
+                      file=sys.stderr)
+                return 2
+            if jars:
+                print("trivy {}: image {} has Java archives ({}{}), whose licences Trivy reads only with "
+                      "the Java DB: set `java_db = \"@rules_trivy//:java_db\"` (the pinned trivy-java-db, "
+                      "a ~1 GB download, fetched once).".format(
+                          label, what, ", ".join(jars[:3]), ", ..." if len(jars) > 3 else ""), file=sys.stderr)
+                return 2
+        # Trivy analyses Java archives only for the vulnerability scanner;
+        # its findings are dropped here.
+        scanners = "vuln,license" if java else "license"
+        cmd = [runfile(a.trivy), "image", "--input", image, "--scanners", scanners,
+               "--skip-db-update", "--skip-java-db-update", "--offline-scan"] + flags + a.extra
+    else:
+        target = os.path.join(tmp, "scan")
+        os.makedirs(target)
+        n = stage(a.manifest, target)
+        what = "{} file(s)".format(n)
+        cmd = [runfile(a.trivy), "fs", "--scanners", "license", "--skip-db-update", "--offline-scan"] + \
+            flags + a.extra + [target]
+
+    env = trivy_env(tmp)
+    rc, out = run_trivy(cmd, env)
+    if rc != 0 or not os.path.exists(out_json):
+        print("trivy {}: Trivy failed (exit {}):".format(label, rc), file=sys.stderr)
+        for line in log_lines(out, ("ERROR", "FATAL")) or out.splitlines()[-20:]:
+            print("  " + line, file=sys.stderr)
+        return 2
+    with open(out_json) as f:
+        report = json.load(f)
+    # The reports name what was scanned by the test's label, not by the
+    # sandbox path Trivy saw (the SBOMs' root package).
+    report["ArtifactName"] = label
+    with open(out_json, "w") as f:
+        json.dump(report, f, indent=2)
+    outputs = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+    if outputs:
+        shutil.copyfile(out_json, os.path.join(outputs, "trivy.json"))
+        for fmt in a.formats:
+            dest = os.path.join(outputs, "licenses." + {"spdx-json": "spdx.json", "cyclonedx": "cdx.json"}[fmt])
+            # convert has no version-check / telemetry flags; trivy_env's
+            # dead proxy keeps it offline.
+            crc, cout = run_trivy([runfile(a.trivy), "convert", "--format", fmt, "--output", dest,
+                                   "--config", "", "--ignorefile", "", "--cache-dir", cache, out_json], env)
+            if crc != 0:
+                print("trivy {}: Trivy could not write the {} report (exit {}):".format(label, fmt, crc),
+                      file=sys.stderr)
+                for line in log_lines(cout, ("ERROR", "FATAL")) or cout.splitlines()[-20:]:
+                    print("  " + line, file=sys.stderr)
+                return 2
+
+    found = license_findings(report)
+    if not found:
+        print("trivy {}: Trivy found no packages{} in {}: nothing was checked. It reads OS package "
+              "databases and language lockfiles (package-lock.json, composer.lock, pom.xml, ...){}.".format(
+                  label, " or licence files" if a.license_full else "", what,
+                  "" if a.license_full else ", and with license_full = True, licence texts"), file=sys.stderr)
+        return 2
+
+    failing, ignored, used = [], [], set()
+    for f in found:
+        if f["category"] in cats or names_allow(f["license"], allowed):
+            continue
+        hit = next((i for i, e in enumerate(entries) if ignore_match(e, f)), None)
+        if hit is None:
+            failing.append(f)
+        else:
+            used.add(hit)
+            ignored.append((f, entries[hit]))
+    failing.sort(key=lambda f: (CATEGORIES.index(f["category"]) if f["category"] in CATEGORIES else 99,
+                                f["license"], f["pkg"], f["path"]))
+
+    if a.junit:
+        write_junit(a.junit, label, [{
+            "id": f["license"], "what": finding_text(f), "severity": f["category"],
+            "title": "", "target": f["path"]} for f in failing], "", passed="every licence allowed")
+
+    counts = {}
+    for f in found:
+        counts[f["category"]] = counts.get(f["category"], 0) + 1
+    npkg = len({(f["pkg"], f["version"], f["path"]) for f in found if f["pkg"]})
+    nfiles = len([f for f in found if not f["pkg"]])
+    print("  {} package(s){}; licences by category: {}".format(
+        npkg, ", {} licence file(s)".format(nfiles) if nfiles else "",
+        ", ".join("{} {}".format(counts[c], c) for c in CATEGORIES if c in counts)))
+    if ignored:
+        print("  ignored by {}:".format(shown))
+        for f, e in ignored:
+            print("    {:24} {}  -- {}".format(f["license"], finding_text(f), e["statement"]))
+    for i, e in enumerate(entries):
+        if i not in used:
+            print("  note: ignore entry licenses[{}] ({}) matched nothing".format(i, e["id"]))
+
+    if not failing:
+        print("PASS: every licence in {} is allowed".format(what))
+        return 0
+    print("trivy {}: {} licence finding(s) not allowed in {}:".format(label, len(failing), what), file=sys.stderr)
+    for f in failing:
+        print("  {:12}  {:24}  {}".format(f["category"], f["license"], finding_text(f)), file=sys.stderr)
+    if any(f["license"] == NOASSERTION for f in failing):
+        print("NOASSERTION: Trivy found no licence for the package (e.g. Go modules without the module "
+              "cache, or a lockfile that doesn't record them).", file=sys.stderr)
+    print("Allow them (`allow`, `allow_categories` or the `allowlist` file), or accept one in the ignore "
+          "file under `licenses:` with a statement and an expired_at.", file=sys.stderr)
     return 1
 
 
@@ -893,7 +1289,7 @@ def latest(a):
 def main(argv):
     sys.stdout.reconfigure(line_buffering=True)
     p = argparse.ArgumentParser(prog="trivy.py", fromfile_prefix_chars=None)
-    p.add_argument("mode", choices=["image", "config", "check-ignore", "ignore-test", "db-info", "latest"])
+    p.add_argument("mode", choices=["image", "config", "license", "check-ignore", "ignore-test", "db-info", "latest"])
     p.add_argument("--runfiles", action="store_true")
     p.add_argument("--label", default="")
     p.add_argument("--trivy")
@@ -910,11 +1306,18 @@ def main(argv):
     p.add_argument("--kind", dest="kinds", action="append")
     p.add_argument("--write")
     p.add_argument("--expect-error", default="")
+    p.add_argument("--allow", action="append", default=[])
+    p.add_argument("--allow-category", action="append", default=[], choices=CATEGORIES)
+    p.add_argument("--allowlist")
+    p.add_argument("--license-full", action="store_true")
+    p.add_argument("--format", dest="formats", action="append", default=[], choices=["spdx-json", "cyclonedx"])
     p.add_argument("extra", nargs="*")
     a = p.parse_args(argv)
     try:
         if a.mode in ("image", "config"):
             return scan(a, a.mode)
+        if a.mode == "license":
+            return license_scan(a)
         if a.mode == "check-ignore":
             return check_ignore(a)
         if a.mode == "ignore-test":

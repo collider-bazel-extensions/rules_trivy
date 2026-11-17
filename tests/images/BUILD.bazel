@@ -48,6 +48,34 @@ alpine_image(
     installed = ":zlib-1.4-r0.installed",
 )
 
+# For licence scans: busybox (GPL-2.0-only, restricted) next to zlib.
+alpine_image(
+    name = "gpl",
+    installed = ":busybox-zlib.installed",
+)
+
+# The log4j jar (pom.properties only: no licence) and a jar whose pom.xml
+# declares GPL-3.0-only.
+genrule(
+    name = "widget_jar",
+    srcs = [
+        ":widget.pom.properties",
+        ":widget.pom.xml",
+    ],
+    outs = ["widget-1.2.3.jar"],
+    cmd = "python3 -I $(location :make_jar.py) $(location :widget.pom.properties) com.example widget $@ $(location :widget.pom.xml)",
+    tools = [":make_jar.py"],
+)
+
+alpine_image(
+    name = "java_licenses",
+    files = {
+        "app/log4j-core-2.14.1.jar": ":log4j_jar",
+        "app/widget-1.2.3.jar": ":widget_jar",
+    },
+    installed = ":zlib-1.4-r0.installed",
+)
+
 # A multi-platform index: the vulnerable image for amd64, the clean one for
 # arm64. trivy_image_test(platform = ...) picks one.
 alpine_image(

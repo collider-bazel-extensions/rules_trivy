@@ -13,7 +13,7 @@ Java DB and checks bundle by OCI manifest digest (private/versions.bzl).
 
 module(
     name = "rules_trivy",
-    version = "0.1.2",
+    version = "0.2.0",
 )
 
 bazel_dep(name = "bazel_skylib", version = "1.8.2")

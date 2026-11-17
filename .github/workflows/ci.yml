@@ -32,7 +32,7 @@ jobs:
         run: bazel test //tests/... --test_output=errors
 
       - name: The Java DB (~1 GB download)
-        run: bazel test //tests:java_db_test --test_output=errors
+        run: bazel test //tests:java_db_test //tests:license_java_db_test --test_output=errors
 
       - name: A consumer module (external labels, a rules_oci image)
         working-directory: tests/consumer

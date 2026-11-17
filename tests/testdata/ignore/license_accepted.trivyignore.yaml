@@ -1,0 +1,9 @@
+licenses:
+  - id: GPL-3.0-only
+    packages: [gpl-thing]
+    statement: test fixture: a build-time tool, never shipped
+    expired_at: 2099-12-31
+  - id: NOASSERTION
+    packages: [nolic-thing@0.1.0]
+    statement: test fixture: MIT per its README; the package doesn't declare it
+    expired_at: 2099-12-31

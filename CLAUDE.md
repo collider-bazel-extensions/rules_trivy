@@ -3,6 +3,7 @@
 Bazel rules for Trivy: hermetic, offline scans as tests.
 - `trivy_image_test`: an image's known vulnerabilities, against a pinned vulnerability DB;
 - `trivy_config_test`: misconfigurations in any rule's outputs, with a pinned checks bundle;
+- `trivy_license_test`: the licences in an image or files against an allowlist (no DB);
 - `trivy_ignore_test`: an ignore file's shape and expiry.
 
 See DESIGN.md.
@@ -11,7 +12,7 @@ See DESIGN.md.
 
 - All tests must pass before any commit with code changes:
   - `bazel test //tests/...` (offline: `.bazelrc` sets `--sandbox_default_allow_network=false`);
-  - `bazel test //tests:java_db_test`;
+  - `bazel test //tests:java_db_test //tests:license_java_db_test`;
   - `(cd tests/consumer && bazel test //...)`;
   - `.github/consumer/check.sh <scratch dir>` (it archives `HEAD`, so commit first).
 - All documentation (`README.md`, `DESIGN.md`, `CLAUDE.md`) must be updated to reflect any code changes before committing: new rules, changed attributes, new public API surface, behaviour changes.
@@ -35,9 +36,10 @@ rules_trivy/
 │   ├── repositories.bzl      # trivy_binary_repo; trivy_data_repo (manifest + layer by digest, GHCR token)
 │   ├── data.bzl              # trivy_data (TrivyDataInfo) declared in each data repo
 │   ├── providers.bzl         # TrivyBinaryInfo, TrivyDataInfo
-│   ├── test.bzl              # trivy_image_test, trivy_config_test, trivy_ignore_test
+│   ├── test.bzl              # trivy_image_test, trivy_config_test, trivy_license_test (macro), trivy_ignore_test
 │   ├── info.bzl              # trivy_db_info, trivy_db_latest (bazel run)
 │   ├── trivy.py              # driver: ignore-file parser/validator, staging, offline trivy run, verdict,
+│   │                         # licence policy (categories, SPDX expressions, NOASSERTION, Java archives),
 │   │                         # JUnit; db-info; latest (tag -> digest, rewrites versions.bzl)
 │   └── run.sh.tmpl           # wrapper: runfiles, then python3 -I driver
 ├── toolchain/                # toolchain_type, per-platform toolchains, :current
@@ -45,12 +47,15 @@ rules_trivy/
 ├── tools/update_db.sh        # DATA pins from the upstream tags
 └── tests/
     ├── BUILD.bazel, analysis_tests.bzl, expect.bzl + expect_test.sh (run a manual target, check exit/output/JUnit)
-    ├── images/               # tiny alpine images (os-release + apk db; tar.bzl + rules_oci), index, tarball, java
+    ├── images/               # tiny alpine images (os-release + apk db; tar.bzl + rules_oci), index, tarball, java,
+    │                         # gpl (busybox GPL-2.0-only), java_licenses (jar with a GPL pom.xml + log4j)
     ├── testdata/config/      # k8s hardened/privileged/template, Dockerfile, terraform, remote module, notes.txt
-    ├── testdata/ignore/      # accepted/expired/empty ignore files + one malformed file per error
+    ├── testdata/ignore/      # accepted/expired/empty ignore files + one malformed file per error (+ licenses)
+    ├── testdata/license/     # npm v3 lockfiles (clean, mixed), allowlists, vendored LICENSE texts (Apache, GPL-3.0)
     ├── consumer/             # separate consumer module (external labels, rules_oci image; CI)
     └── checksums_test.sh, data_pins_test.sh, version_test.sh, db_info_test.sh, network_blocked_test.sh,
-        missing_input_test.sh (a scan with one input removed from a runfiles copy fails naming it)
+        missing_input_test.sh (a scan with one input removed from a runfiles copy fails naming it),
+        license_reports_test.sh (trivy.json + SBOMs list each package's licence, named by label)
 ```
 
 ## Key concepts
@@ -66,6 +71,7 @@ rules_trivy/
   - Environment: `TRIVY_*` removed, `HTTP(S)_PROXY` set to `127.0.0.1:9`, `PATH` empty, and `HOME` in the tmpdir.
 - **Ignore file.** Trivy's `.trivyignore.yaml` schema, read by a strict YAML-subset parser in `trivy.py`. `id`, `statement` and `expired_at` are mandatory; an expired entry (today ≥ expired_at, UTC) fails the test. The checked entries go to Trivy as JSON.
 - **Verdict.** Trivy reports everything (`--exit-code 0`). The driver fails on severity ≥ `severity`. Exit 0 pass, 1 findings or expired entries, 2 errors.
+- **Licences.** `--scanners license --list-all-pkgs`, no DB. A finding passes if its Trivy category is in `allow_categories` or its name (SPDX expression evaluated by the driver) is allowed. A package without a licence is `NOASSERTION`. Trivy skips Java archives unless the vuln scanner runs, so with `java_db` the scan is `vuln,license` (vulns dropped) and without it the driver lists the layers' jars and fails if any. `licenses:` ignore entries are applied by the driver (Trivy can't match a package).
 - **Toolchain.** Unversioned `trivy_<plat>` repos. Keep `DEFAULT_VERSION` and `trivy.version()` in `MODULE.bazel` equal (`//tests:version_test`).
 
 ## Public API
@@ -74,6 +80,8 @@ rules_trivy/
 load("@rules_trivy//:defs.bzl",
     "trivy_image_test",   # image, severity, ignore, ignore_unfixed, java_db, platform, extra_args
     "trivy_config_test",  # srcs, severity, ignore, extra_args
+    "trivy_license_test", # image | srcs, allow, allow_categories, allowlist, ignore, license_full,
+                          # formats, java_db, platform, extra_args
     "trivy_ignore_test",  # src, expect_error (regex; empty = must pass)
     "TrivyBinaryInfo", "TrivyDataInfo",
 )
@@ -87,7 +95,7 @@ load("@rules_trivy//:defs.bzl",
 
 ```sh
 bazel test //tests/...
-bazel test //tests:java_db_test               # ~1 GB Java DB download, once
+bazel test //tests:java_db_test //tests:license_java_db_test   # ~1 GB Java DB download, once
 (cd tests/consumer && bazel test //...)
 .github/consumer/check.sh /tmp/consumer       # from HEAD's git archive
 tools/update_versions.sh 0.76.2               # re-pin; --check verifies
@@ -96,8 +104,8 @@ tools/update_db.sh                            # re-pin DATA; then re-run the tes
 
 ### Test results (last full run: 2026-11-16)
 
-All 56 `//tests/...` targets pass on Linux x86_64 (Trivy 0.76.2, DB `sha256:0d6a013bd032…`) with network blocked in the sandbox, plus the manual `//tests:java_db_test`. Other checks:
-- **Consumer module:** `tests/consumer` passes: a rules_oci image with accepted CVEs, a config test and an ignore test, from another repository.
+All 86 `//tests/...` targets pass on Linux x86_64 (Trivy 0.76.2, DB `sha256:0d6a013bd032…`) with network blocked in the sandbox, plus the manual `//tests:java_db_test` and `//tests:license_java_db_test`. Other checks:
+- **Consumer module:** `tests/consumer` passes: a rules_oci image with accepted CVEs, a licence test of the same image (with an SPDX report), a config test and an ignore test, from another repository.
 - **Release archive:** `.github/consumer/check.sh` passes all seven checks: `//...` loads (20 targets) without `tests/`/`tools/`; no tag resolves to the pins; repeated tag; unpinned version fails; self-pinned 0.76.1 runs, an unpinned darwin platform fails on fetch; root `trivy.checks()` pin applied (v2.2.0); two `trivy.db()` fail.
 - **Pins:** `tools/update_versions.sh --check`: all four platforms match the published checksums and the downloads. `tools/update_db.sh`'s rewrite restored a deliberately stale DB pin.
 - **Python:** `trivy.py` parses as Python 3.8 syntax. Only Python 3.14 was available to run it.
@@ -120,11 +128,22 @@ All 56 `//tests/...` targets pass on Linux x86_64 (Trivy 0.76.2, DB `sha256:0d6a
 | `//tests:ignored_config_test`, `//tests:expired_config_test` | misconfig ignores (with `paths`); expired one fails | PASSED |
 | `//tests:remote_module_test`, `//tests:remote_module_note_test` | remote Terraform module isn't fetched; NOTE printed; passes | PASSED |
 | `//tests:unrecognised_test` | nothing recognised → exit 2, not a silent pass | PASSED |
-| `//tests:ignore_*_test` (18) | valid/empty files pass; 13 malformed files and 2 expired ones fail with their messages | PASSED |
+| `//tests:ignore_*_test` (21) | valid/empty files pass (one with `licenses:`); 15 malformed files and 2 expired ones fail with their messages | PASSED |
 | `//tests:checksums_test`, `//tests:data_pins_test`, `//tests:version_test` | pins well-formed; binary = DEFAULT_VERSION = MODULE.bazel | PASSED |
 | `//tests:db_info_test` | `bazel run //:db_info` output | PASSED |
 | `//tests:network_blocked_test` | the test sandbox has no network | PASSED |
-| `//tests:analysis_tests_*` (11) | providers (data kinds, binary), executables, no Java DB unless asked, bad/lowercase severity, two files / non-image as `image`, empty `srcs` | PASSED |
+| `//tests:license_clean_srcs_test`, `//tests:license_clean_srcs_output_test` | lockfile within the default categories passes (an OR expression via MIT) | PASSED |
+| `//tests:license_mixed_test` | GPL-3.0-only (restricted), MPL-2.0 (reciprocal) and a package without a licence (NOASSERTION) fail, each named with version and path; JUnit 3 | PASSED |
+| `//tests:license_ignored_test`, `//tests:license_ignored_output_test` | the same passes with `allow` + `licenses:` ignore entries (by package, by name@version); each listed with its statement | PASSED |
+| `//tests:license_allowlist_test`, `//tests:license_allowlist_output_test`, `//tests:license_bad_allowlist_test` | allowlist file (a category and names); an unknown category in it → exit 2, naming the line | PASSED |
+| `//tests:license_names_only_test` | `allow_categories = []`: names only, an OR expression allowed through one operand | PASSED |
+| `//tests:license_other_package_test`, `//tests:license_expired_test` | an entry for another package doesn't apply (noted); an expired licence entry fails | PASSED |
+| `//tests:license_full_test`, `//tests:license_nothing_test` | `license_full`: a GPL-3.0 LICENSE text fails, Apache-2.0 passes; licence texts without it → exit 2, nothing checked | PASSED |
+| `//tests:license_clean_image_test`, `//tests:license_gpl_image_test`, `//tests:license_tarball_image_test`, `//tests:license_index_image_test` | image OS packages, no DB: zlib passes, busybox GPL-2.0-only fails; tarball and index forms | PASSED |
+| `//tests:license_java_without_db_test` | an image with jars and no `java_db` → exit 2 naming them (Trivy alone passes it) | PASSED |
+| `//tests:license_java_db_test` (manual) | with the Java DB: the jar's pom.xml GPL-3.0-only, NOASSERTION for log4j; no CVEs reported | PASSED |
+| `//tests:license_reports_test` | trivy.json, licenses.spdx.json, licenses.cdx.json list every package's licence; named by the label, not a sandbox path | PASSED |
+| `//tests:analysis_tests_*` (18) | providers (data kinds, binary), executables, no Java DB unless asked, bad/lowercase severity, two files / non-image as `image`, empty `srcs`; licence test: no data artifact in its runfiles, image and srcs both / neither, unknown category, unknown format, `java_db` with `srcs` | PASSED |
 
 ## Known limitations
 
@@ -133,3 +152,4 @@ All 56 `//tests/...` targets pass on Linux x86_64 (Trivy 0.76.2, DB `sha256:0d6a
 - Remote Terraform modules are never evaluated.
 - Fixture expectations depend on the pinned DB; a DB bump can change them.
 - Only Linux x86_64 was run; the darwin and arm64 binaries are pinned and verified, not executed.
+- Licence scans see only what Trivy reads offline: Go modules are `NOASSERTION` (no module cache), `COPYING` files aren't classified, jars need `java_db`.

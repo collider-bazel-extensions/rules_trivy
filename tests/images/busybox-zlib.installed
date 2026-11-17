@@ -1,0 +1,12 @@
+P:busybox
+V:1.37.0-r18
+A:x86_64
+o:busybox
+L:GPL-2.0-only
+
+P:zlib
+V:1.4-r0
+A:x86_64
+o:zlib
+L:Zlib
+

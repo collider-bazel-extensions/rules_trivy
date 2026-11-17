@@ -1,5 +1,5 @@
 load("@rules_oci//oci:defs.bzl", "oci_image")
-load("@rules_trivy//:defs.bzl", "trivy_config_test", "trivy_ignore_test", "trivy_image_test")
+load("@rules_trivy//:defs.bzl", "trivy_config_test", "trivy_ignore_test", "trivy_image_test", "trivy_license_test")
 load("@tar.bzl//tar:tar.bzl", "tar")
 
 tar(
@@ -29,6 +29,13 @@ oci_image(
 trivy_image_test(
     name = "image_test",
     ignore = "accepted.trivyignore.yaml",
+    image = ":image",
+)
+
+# zlib's licence (Zlib) is in the default categories; no DB fetched.
+trivy_license_test(
+    name = "license_test",
+    formats = ["spdx-json"],
     image = ":image",
 )
 

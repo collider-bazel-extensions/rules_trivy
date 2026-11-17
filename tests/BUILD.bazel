@@ -9,6 +9,7 @@ load(
     "trivy_config_test",
     "trivy_ignore_test",
     "trivy_image_test",
+    "trivy_license_test",
 )
 load(":analysis_tests.bzl", "analysis_test_suite")
 load(":expect.bzl", "expect_test")
@@ -18,6 +19,8 @@ exports_files(["expect_test.sh"])
 _IGN = "//tests/testdata/ignore:"
 
 _CFG = "//tests/testdata/config:"
+
+_LIC = "//tests/testdata/license:"
 
 # ---- trivy_image_test -----------------------------------------------------------
 
@@ -340,6 +343,278 @@ expect_test(
     target = ":unrecognised_scan",
 )
 
+# ---- trivy_license_test ---------------------------------------------------------
+
+# Lockfile licences within the default categories (notice, permissive,
+# unencumbered) pass; an OR expression takes its most permissive operand.
+trivy_license_test(
+    name = "license_clean_srcs_test",
+    srcs = [_LIC + "clean/package-lock.json"],
+    formats = [
+        "cyclonedx",
+        "spdx-json",
+    ],
+)
+
+expect_test(
+    name = "license_clean_srcs_output_test",
+    exit_code = 0,
+    junit_failures = 0,
+    patterns = [
+        "allowed: categories notice, permissive, unencumbered",
+        "4 package\\(s\\); licences by category: 4 notice",
+        "PASS: every licence in 1 file\\(s\\) is allowed",
+        "!NOASSERTION",
+    ],
+    target = ":license_clean_srcs_test",
+)
+
+# The reports (trivy.json and the `formats` SBOMs) carry each package's licence.
+sh_test(
+    name = "license_reports_test",
+    srcs = ["license_reports_test.sh"],
+    args = ["$(rootpath :license_clean_srcs_test)"],
+    data = [":license_clean_srcs_test"],
+)
+
+# Restricted, reciprocal, and a package with no licence fail, each named.
+trivy_license_test(
+    name = "license_mixed_scan",
+    srcs = [_LIC + "mixed/package-lock.json"],
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "license_mixed_test",
+    exit_code = 1,
+    junit_failures = 3,
+    patterns = [
+        "3 licence finding\\(s\\) not allowed in 1 file\\(s\\):",
+        "restricted +GPL-3.0-only +gpl-thing 2.0.0 +\\(tests/testdata/license/mixed/package-lock.json\\)",
+        "reciprocal +MPL-2.0 +mpl-thing 1.1.0",
+        "unknown +NOASSERTION +nolic-thing 0.1.0",
+        "NOASSERTION: Trivy found no licence for the package",
+        "!mit-thing",
+    ],
+    target = ":license_mixed_scan",
+)
+
+# The same, passing: MPL-2.0 allowed by name, the other two accepted in
+# the ignore file with reasons.
+trivy_license_test(
+    name = "license_ignored_test",
+    srcs = [_LIC + "mixed/package-lock.json"],
+    allow = ["MPL-2.0"],
+    ignore = _IGN + "license_accepted.trivyignore.yaml",
+)
+
+expect_test(
+    name = "license_ignored_output_test",
+    exit_code = 0,
+    patterns = [
+        "allowed: categories notice, permissive, unencumbered; licences MPL-2.0",
+        "GPL-3.0-only +gpl-thing 2.0.0 .* -- test fixture: a build-time tool, never shipped",
+        "NOASSERTION +nolic-thing 0.1.0 .* -- test fixture: MIT per its README",
+        "!matched nothing",
+        "PASS",
+    ],
+    target = ":license_ignored_test",
+)
+
+# The allowlist file: a category and two names.
+trivy_license_test(
+    name = "license_allowlist_test",
+    srcs = [_LIC + "mixed/package-lock.json"],
+    allowlist = _LIC + "allowlist.txt",
+)
+
+expect_test(
+    name = "license_allowlist_output_test",
+    exit_code = 0,
+    patterns = ["allowed: categories reciprocal, notice, permissive, unencumbered; licences GPL-3.0-only, NOASSERTION"],
+    target = ":license_allowlist_test",
+)
+
+# allow_categories replaces the default: with only notice, MIT passes, and
+# the OR expression passes through MIT.
+trivy_license_test(
+    name = "license_names_only_test",
+    srcs = [_LIC + "clean/package-lock.json"],
+    allow = [
+        "BSD-3-Clause",
+        "ISC",
+        "MIT",
+    ],
+    allow_categories = [],
+)
+
+# An unknown category in the allowlist file: exit 2, naming the line.
+trivy_license_test(
+    name = "license_bad_allowlist_scan",
+    srcs = [_LIC + "clean/package-lock.json"],
+    allowlist = _LIC + "bad_allowlist.txt",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "license_bad_allowlist_test",
+    exit_code = 2,
+    patterns = ["allowlist tests/testdata/license/bad_allowlist.txt:\n?.*line 2: unknown category 'copyleft'"],
+    target = ":license_bad_allowlist_scan",
+)
+
+# An ignore entry for another package doesn't cover this one.
+trivy_license_test(
+    name = "license_other_package_scan",
+    srcs = [_LIC + "mixed/package-lock.json"],
+    allow = [
+        "MPL-2.0",
+        "NOASSERTION",
+    ],
+    ignore = _IGN + "license_other_package.trivyignore.yaml",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "license_other_package_test",
+    exit_code = 1,
+    junit_failures = 1,
+    patterns = [
+        "note: ignore entry licenses\\[0\\] \\(GPL-3.0-only\\) matched nothing",
+        "restricted +GPL-3.0-only +gpl-thing 2.0.0",
+    ],
+    target = ":license_other_package_scan",
+)
+
+# An expired licence entry fails, naming it.
+trivy_license_test(
+    name = "license_expired_scan",
+    srcs = [_LIC + "mixed/package-lock.json"],
+    ignore = _IGN + "license_expired.trivyignore.yaml",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "license_expired_test",
+    exit_code = 1,
+    patterns = ["licenses\\[0\\] \\(GPL-3.0-only\\): expired_at 2020-01-01"],
+    target = ":license_expired_scan",
+)
+
+# Licence texts, with license_full: GPL-3.0 (restricted) fails, Apache-2.0
+# (notice) doesn't.
+trivy_license_test(
+    name = "license_full_scan",
+    srcs = [
+        _LIC + "vendored/apache/LICENSE",
+        _LIC + "vendored/gpl/LICENSE",
+    ],
+    license_full = True,
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "license_full_test",
+    exit_code = 1,
+    junit_failures = 1,
+    patterns = [
+        "restricted +GPL-3.0(-only)? +licence file +\\(tests/testdata/license/vendored/gpl/LICENSE\\)",
+        "0 package\\(s\\), 2 licence file\\(s\\); licences by category: 1 restricted, 1 notice",
+        "!vendored/apache/LICENSE",
+    ],
+    target = ":license_full_scan",
+)
+
+# Without license_full, licence texts alone are nothing to check: exit 2.
+trivy_license_test(
+    name = "license_nothing_scan",
+    srcs = [_LIC + "vendored/apache/LICENSE"],
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "license_nothing_test",
+    exit_code = 2,
+    patterns = ["Trivy found no packages in 1 file\\(s\\): nothing was checked.*license_full = True"],
+    target = ":license_nothing_scan",
+)
+
+# Images: OS package licences, no DB.
+trivy_license_test(
+    name = "license_clean_image_test",
+    image = "//tests/images:clean",
+)
+
+trivy_license_test(
+    name = "license_gpl_image_scan",
+    image = "//tests/images:gpl",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "license_gpl_image_test",
+    exit_code = 1,
+    junit_failures = 1,
+    patterns = [
+        "restricted +GPL-2.0-only +busybox 1.37.0-r18",
+        "2 package\\(s\\); licences by category: 1 restricted, 1 notice",
+        "!zlib",
+    ],
+    target = ":license_gpl_image_scan",
+)
+
+# The tarball form and a multi-platform index read the same way.
+trivy_license_test(
+    name = "license_tarball_image_test",
+    image = "//tests/images:vulnerable_tarball",
+)
+
+trivy_license_test(
+    name = "license_index_image_test",
+    image = "//tests/images:multiarch",
+    platform = "linux/arm64",
+)
+
+# Java archives: without the Java DB Trivy skips them, so the test refuses
+# (exit 2) rather than pass them unchecked.
+trivy_license_test(
+    name = "license_java_without_db_scan",
+    image = "//tests/images:java_licenses",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "license_java_without_db_test",
+    exit_code = 2,
+    patterns = [
+        "has Java archives \\(app/log4j-core-2.14.1.jar, app/widget-1.2.3.jar\\), whose licences Trivy reads only with the Java DB",
+        "set `java_db = \"@rules_trivy//:java_db\"`",
+    ],
+    target = ":license_java_without_db_scan",
+)
+
+# With it (CI runs license_java_db_test with java_db_test): the jar's
+# pom.xml licence, and NOASSERTION for the jar without one.
+trivy_license_test(
+    name = "license_java_scan",
+    image = "//tests/images:java_licenses",
+    java_db = "//:java_db",
+    tags = ["manual"],
+)
+
+expect_test(
+    name = "license_java_db_test",
+    exit_code = 1,
+    junit_failures = 2,
+    patterns = [
+        "restricted +GPL-3.0-only +com.example:widget 1.2.3 +\\(app/widget-1.2.3.jar\\)",
+        "unknown +NOASSERTION +org.apache.logging.log4j:log4j-core 2.14.1 +\\(app/log4j-core-2.14.1.jar\\)",
+        "!CVE-",
+    ],
+    tags = ["manual"],
+    target = ":license_java_scan",
+)
+
 # ---- trivy_ignore_test -----------------------------------------------------------
 
 [trivy_ignore_test(
@@ -363,6 +638,8 @@ expect_test(
     ("secrets", "unknown section 'secrets' -- rules_trivy scans don't report secrets"),
     ("empty_paths", "'paths' must be a non-empty list of strings"),
     ("bad_indent", "line 5: unexpected indentation"),
+    ("license_section", "unknown section 'license' -- the section is 'licenses'"),
+    ("license_bad_packages", "licenses\\[0\\] \\(GPL-3.0-only\\): 'packages' must be a non-empty list of strings"),
 ]]
 
 [trivy_ignore_test(
@@ -372,9 +649,10 @@ expect_test(
 ) for name, error in [
     ("image_expired", "1 expired entry:\n  vulnerabilities\\[0\\] \\(CVE-2026-22184\\): expired_at 2020-01-01"),
     ("config_expired", "misconfigurations\\[0\\] \\(KSV-0017\\): expired_at 2021-06-30"),
+    ("license_accepted", ""),
 ]]
 
-# A missing input (image, data artifact, src, ignore file) fails naming it.
+# A missing input (image, data artifact, src, ignore file, allowlist) fails naming it.
 sh_test(
     name = "missing_input_test",
     srcs = ["missing_input_test.sh"],
@@ -382,10 +660,14 @@ sh_test(
         "$(rootpath :clean_image_test)",
         "$(rootpath :tarball_image_scan)",
         "$(rootpath :ignored_config_test)",
+        "$(rootpath :license_clean_image_test)",
+        "$(rootpath :license_allowlist_test)",
     ],
     data = [
         ":clean_image_test",
         ":ignored_config_test",
+        ":license_allowlist_test",
+        ":license_clean_image_test",
         ":tarball_image_scan",
     ],
 )

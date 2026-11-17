@@ -13,11 +13,11 @@ No host Trivy needed. The binary is the upstream release for linux and darwin on
 ## Installation
 
 ```python
-bazel_dep(name = "rules_trivy", version = "0.1.1")
+bazel_dep(name = "rules_trivy", version = "0.1.2")
 archive_override(
     module_name = "rules_trivy",
-    urls = ["https://github.com/collider-bazel-extensions/rules_trivy/archive/refs/tags/v0.1.1.tar.gz"],
-    strip_prefix = "rules_trivy-0.1.1",
+    urls = ["https://github.com/collider-bazel-extensions/rules_trivy/archive/refs/tags/v0.1.2.tar.gz"],
+    strip_prefix = "rules_trivy-0.1.2",
     integrity = "sha256-LDIqd49WiVBrohGdzZOf64zJOuLMUVjslMTDevKQoCs=",
 )
 ```
@@ -28,7 +28,7 @@ To pin by git tag instead, replace the `archive_override` with:
 git_override(
     module_name = "rules_trivy",
     remote = "https://github.com/collider-bazel-extensions/rules_trivy",
-    tag = "v0.1.1",
+    tag = "v0.1.2",
 )
 ```
 
@@ -280,3 +280,7 @@ See [DESIGN.md](DESIGN.md) for the design and trade-offs, and [CLAUDE.md](CLAUDE
 Want Bazel rules for another tool or service?
 [Request a rules package](https://github.com/collider-bazel-extensions/.github/issues/new?template=request-a-rules-package.yml).
 The [organization page](https://github.com/collider-bazel-extensions) lists every package.
+
+## License
+
+[Apache License 2.0](LICENSE) (SPDX: `Apache-2.0`).

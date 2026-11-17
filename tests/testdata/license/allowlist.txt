@@ -1,0 +1,4 @@
+# Licences this project accepts beyond the default categories.
+category: reciprocal   # MPL-2.0 and the like: file-level copyleft
+GPL-3.0-only
+NOASSERTION

@@ -1,0 +1,5 @@
+licenses:
+  - id: GPL-3.0-only
+    packages: [some-other-thing]
+    statement: test fixture: names a package the scan doesn't have
+    expired_at: 2099-12-31

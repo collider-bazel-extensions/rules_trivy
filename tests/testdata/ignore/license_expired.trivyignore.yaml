@@ -1,0 +1,5 @@
+licenses:
+  - id: GPL-3.0-only
+    packages: [gpl-thing]
+    statement: test fixture: review overdue
+    expired_at: 2020-01-01

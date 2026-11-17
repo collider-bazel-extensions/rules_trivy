@@ -3,9 +3,9 @@
 # naming that input, never a Trivy error or a Python traceback. Each case
 # runs a scan against a copy of this test's runfiles (links only) with one
 # input removed.
-# Argv: <image test> <tarball image test> <config test>
+# Argv: <image test> <tarball image test> <config test> <licence image test> <licence srcs test>
 set -euo pipefail
-image_test="$1"; tarball_test="$2"; config_test="$3"
+image_test="$1"; tarball_test="$2"; config_test="$3"; license_image_test="$4"; license_srcs_test="$5"
 rf="${RUNFILES_DIR:-$TEST_SRCDIR}"
 status=0
 
@@ -46,6 +46,11 @@ expect "$config_test" 'a src is missing: tests/testdata/config/k8s/privileged.ya
   _main/tests/testdata/config/k8s/privileged.yaml
 expect "$config_test" 'the ignore file is missing: tests/testdata/ignore/config_accepted.trivyignore.yaml' \
   _main/tests/testdata/ignore/config_accepted.trivyignore.yaml
+expect "$license_image_test" 'the image is missing: tests/images/clean' _main/tests/images/clean
+expect "$license_srcs_test" 'a src is missing: tests/testdata/license/mixed/package-lock.json' \
+  _main/tests/testdata/license/mixed/package-lock.json
+expect "$license_srcs_test" 'the allowlist is missing: tests/testdata/license/allowlist.txt' \
+  _main/tests/testdata/license/allowlist.txt
 
 [[ "$status" == 0 ]] && echo "PASS"
 exit "$status"

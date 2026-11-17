@@ -1,23 +1,24 @@
 # rules_trivy
 
-Bazel rules for [Trivy](https://github.com/aquasecurity/trivy), the vulnerability and misconfiguration scanner. They run Trivy scans as **hermetic, offline Bazel tests**: no test downloads anything, and a result depends only on the commit.
+Bazel rules for [Trivy](https://github.com/aquasecurity/trivy), the vulnerability, misconfiguration and licence scanner. They run Trivy scans as **hermetic, offline Bazel tests**: no test downloads anything, and a result depends only on the commit.
 
 - `trivy_image_test` — scans a container image (a rules_oci `oci_image`, or an image tarball) for known vulnerabilities, against a vulnerability DB pinned as a Bazel repository.
 - `trivy_config_test` — scans Kubernetes manifests, Helm and Kustomize renders, Terraform, Dockerfiles (any rule's output files) for misconfigurations, with a pinned checks bundle.
+- `trivy_license_test` — checks the licences Trivy finds in an image or in files (lockfiles, source trees) against an allowlist of licence names and Trivy's licence categories. No DB needed.
 - `trivy_ignore_test` — checks an ignore file on its own: its shape, a reason and an expiry on every entry, and that none has expired.
 
-Both scans fail on findings at or above a `severity`, except those listed in an `ignore` file, where every entry carries a reason (`statement`) and an expiry (`expired_at`). An expired entry fails the test, naming it.
+The vulnerability and configuration scans fail on findings at or above a `severity`, and the licence scan on licences outside its allowlist, except those listed in an `ignore` file, where every entry carries a reason (`statement`) and an expiry (`expired_at`). An expired entry fails the test, naming it.
 
 No host Trivy needed. The binary is the upstream release for linux and darwin on amd64 and arm64, pinned by SHA-256 (Trivy 0.76.2). The vulnerability DB, the Java DB and the checks bundle are pinned by OCI manifest digest; each test log shows the DB's digest and age. The rules need `python3` (3.8+) on the host.
 
 ## Installation
 
 ```python
-bazel_dep(name = "rules_trivy", version = "0.1.2")
+bazel_dep(name = "rules_trivy", version = "0.2.0")
 archive_override(
     module_name = "rules_trivy",
-    urls = ["https://github.com/collider-bazel-extensions/rules_trivy/archive/refs/tags/v0.1.2.tar.gz"],
-    strip_prefix = "rules_trivy-0.1.2",
+    urls = ["https://github.com/collider-bazel-extensions/rules_trivy/archive/refs/tags/v0.2.0.tar.gz"],
+    strip_prefix = "rules_trivy-0.2.0",
     integrity = "sha256-4gtky1RIJWSZh7ntj6LThkPbdYlE8J1HeZWtWP2Ywpg=",
 )
 ```
@@ -28,7 +29,7 @@ To pin by git tag instead, replace the `archive_override` with:
 git_override(
     module_name = "rules_trivy",
     remote = "https://github.com/collider-bazel-extensions/rules_trivy",
-    tag = "v0.1.2",
+    tag = "v0.2.0",
 )
 ```
 
@@ -132,6 +133,67 @@ trivy //deploy:manifests_test: 3 finding(s) at or above HIGH in 4 file(s):
 - **Checks:** from the pinned trivy-checks bundle, not Trivy's run-time download (`--skip-check-update`).
 - Takes `severity`, `ignore` and `extra_args` like `trivy_image_test`, and writes the same reports.
 
+## `trivy_license_test`
+
+```python
+load("@rules_trivy//:defs.bzl", "trivy_license_test")
+
+trivy_license_test(
+    name = "image_licenses_test",
+    image = ":image",                       # an oci_image, index (with platform) or image .tar
+    allow = ["MPL-2.0"],                    # by name, on top of the default categories
+    ignore = ".trivyignore.yaml",           # optional: `licenses:` entries
+    formats = ["spdx-json", "cyclonedx"],   # optional SBOMs next to trivy.json
+)
+
+trivy_license_test(
+    name = "npm_licenses_test",
+    srcs = ["package-lock.json"],           # lockfiles, source trees, any rule's outputs
+    allowlist = "//:licenses.allowed",      # optional file: one licence or `category: <name>` per line
+)
+```
+
+A licence outside the policy fails the test, naming the package, its version and where Trivy found it:
+
+```
+trivy //web:npm_licenses_test: Trivy 0.76.2, licence scan
+  allowed: categories notice, permissive, unencumbered
+  4 package(s); licences by category: 1 restricted, 1 reciprocal, 1 notice, 1 unknown
+trivy //web:npm_licenses_test: 3 licence finding(s) not allowed in 1 file(s):
+  restricted    GPL-3.0-only              gpl-thing 2.0.0  (web/package-lock.json)
+  reciprocal    MPL-2.0                   mpl-thing 1.1.0  (web/package-lock.json)
+  unknown       NOASSERTION               nolic-thing 0.1.0  (web/package-lock.json)
+NOASSERTION: Trivy found no licence for the package (e.g. Go modules without the module cache, or a lockfile that doesn't record them).
+Allow them (`allow`, `allow_categories` or the `allowlist` file), or accept one in the ignore file under `licenses:` with a statement and an expired_at.
+```
+
+- **The policy.** A licence passes if its Trivy category is in `allow_categories`, or its name is in `allow` or the `allowlist` file.
+  - **Categories** are Trivy's (Google's licence classification): `forbidden`, `restricted` (e.g. GPL, LGPL: strong copyleft), `reciprocal` (MPL, EPL: weak copyleft), `notice` (MIT, BSD, Apache-2.0), `permissive`, `unencumbered` (CC0, Unlicense), `unknown`. The default allows `notice`, `permissive` and `unencumbered`; setting `allow_categories` replaces that.
+  - **Names** are SPDX ids as Trivy normalises them (`Apache 2.0` → `Apache-2.0`, `GPLv2` → `GPL-2.0-only`), matched case-insensitively. In an SPDX expression, one `OR` operand or every `AND` operand must be allowed. Trivy categorises a whole expression the same way (OR takes the least restrictive operand, AND the most); `X WITH exception` is `unknown` to Trivy, so allow it by its full name.
+  - **No licence at all is a finding,** `NOASSERTION` (category `unknown`): Trivy found the package but no licence for it. Allow `NOASSERTION`, or accept the package in the ignore file. It isn't passed silently.
+- **What Trivy reads,** offline and without a DB:
+  - in an image, the OS package databases (apk, dpkg, rpm) and the language packages Trivy finds there;
+  - in `srcs`, lockfiles that record licences: `package-lock.json` (v2/v3), `composer.lock`, `pom.xml`, Python `*.dist-info` and others. A `go.mod` gives Go modules without licences (Trivy reads those from the module cache, which a test doesn't have): they come out `NOASSERTION`;
+  - with `license_full = True`, licence texts in files too. Trivy 0.76 classifies only licence-named files (`LICENSE`, `LICENSE.md`, ...), not `COPYING`.
+- **Java archives in an image** need `java_db = "@rules_trivy//:java_db"`: Trivy analyses `.jar`/`.war`/`.ear` files only with the Java DB, reading the licences in their `pom.xml`. Without it, Trivy's licence scan skips them silently, so the test lists the layers' Java archives itself and fails (exit 2) when there are any, naming them. `java_db` also brings the vulnerability DB (Trivy analyses Java archives only for its vulnerability scanner); the vulnerability findings are dropped.
+- **Nothing found is an error.** If Trivy finds no package (or, with `license_full`, no licence file) the test fails (exit 2), rather than passing having checked nothing.
+- **Missing inputs** (the image, a src, the allowlist, the ignore file) fail before Trivy runs, naming the input, as in the other scans.
+- **Reports:** JUnit, one failing case per finding; Trivy's JSON report (with every package, `--list-all-pkgs`) as `trivy.json`, plus `licenses.spdx.json` and `licenses.cdx.json` for `formats`, in the test's undeclared outputs: input for a THIRD_PARTY_NOTICES generator. The reports name the scan by the test's label.
+
+| Argument | Default | |
+|---|---|---|
+| `image` | | an `oci_image`, `oci_image_index`, or image `.tar`; set this or `srcs` |
+| `srcs` | | files to scan, staged under their workspace paths; set this or `image` |
+| `allow` | `[]` | licences allowed by name (SPDX ids; `NOASSERTION`) |
+| `allow_categories` | `["notice", "permissive", "unencumbered"]` | Trivy categories allowed |
+| `allowlist` | none | a file: one licence name, or `category: <name>`, per line; `#` comments |
+| `ignore` | none | an ignore file; its `licenses:` entries (below) |
+| `license_full` | `False` | also classify licence texts in files (`--license-full`) |
+| `formats` | `[]` | `"spdx-json"`, `"cyclonedx"`: SBOMs in the undeclared outputs |
+| `java_db` | none | `"@rules_trivy//:java_db"` for images with Java archives |
+| `platform` | none | for an image index: `"linux/arm64"`, ... |
+| `extra_args` | `[]` | extra Trivy arguments |
+
 ## The ignore file
 
 An ignore file uses Trivy's own [`.trivyignore.yaml`](https://trivy.dev/docs/latest/guide/configuration/filtering/#trivyignoreyaml) schema, with two rules added: every entry needs a `statement` (the reason) and an `expired_at` date.
@@ -150,9 +212,16 @@ misconfigurations:
     statement: the node agent needs host access
     expired_at: 2027-06-30
     paths: ["deploy/rendered/agent.yaml"]   # optional; workspace paths, globs allowed
+licenses:
+  - id: GPL-3.0-only                        # the licence as reported, or NOASSERTION
+    statement: build-time tool, never shipped
+    expired_at: 2027-06-30
+    packages: [gpl-thing]                   # optional: name or name@version
+    paths: ["web/package-lock.json"]        # optional; globs allowed
 ```
 
-- **Entries:** `vulnerabilities` and `misconfigurations` hold lists of entries. Each entry has `id`, `statement` and `expired_at` (`YYYY-MM-DD`). `paths` and `purls` (vulnerabilities only) narrow it.
+- **Entries:** `vulnerabilities`, `misconfigurations` and `licenses` hold lists of entries. Each entry has `id`, `statement` and `expired_at` (`YYYY-MM-DD`). `paths`, `purls` (vulnerabilities only) and `packages` (licences only) narrow it.
+- **One file for every scan.** Each scan reads its own section: a vulnerability scan ignores `licenses:`, a licence scan the other two (and their expiry).
 - **Expiry.** An entry expires at the start of its `expired_at` day (UTC), as in Trivy. Trivy itself just stops applying an expired entry; here the test fails, naming it:
 
   ```
@@ -170,7 +239,7 @@ misconfigurations:
   ```
 
 - **The YAML subset:** the file is read without a YAML library. Block mappings and lists, `[a, b]` lists, plain or quoted strings, and comments are supported. Anchors, tags, multi-line (`|`, `>`) strings and `{...}` mappings are rejected by line number rather than guessed at.
-- **What applies:** the checked entries are handed to Trivy as its `--ignorefile`, so matching (`id`, `paths`, `purls`) is Trivy's. An image test lists what each entry suppressed, and notes entries that matched nothing.
+- **What applies:** the checked vulnerability and misconfiguration entries are handed to Trivy as its `--ignorefile`, so matching (`id`, `paths`, `purls`) is Trivy's. Licence entries are applied by the test itself, since Trivy's own licence ignores can't name a package: `id` matches the licence (case-insensitively), `packages` the package's name or `name@version`, `paths` where it was found. An image or licence test lists what each entry suppressed, and notes entries that matched nothing.
 - **Caching.** Bazel caches a passing test until its inputs change, and the date isn't an input. So a cached pass doesn't notice an entry expiring. Inputs do change whenever the DB pin is bumped, which re-runs every image test. For a hard guarantee, run the scans uncached on a schedule: `bazel test --nocache_test_results //...`.
 
 ### `trivy_ignore_test`
@@ -198,6 +267,8 @@ Trivy normally downloads three OCI artifacts at scan time. rules_trivy pins each
 | vulnerability DB | `ghcr.io/aquasecurity/trivy-db` (tag `2`) | `trivy_image_test` | ~140 MB / ~1.8 GB |
 | Java DB | `ghcr.io/aquasecurity/trivy-java-db` (tag `1`) | `trivy_image_test(java_db = ...)` | ~1 GB / ~1.6 GB |
 | checks bundle | `ghcr.io/aquasecurity/trivy-checks` (tag `2`) | `trivy_config_test` | ~240 KB |
+
+`trivy_license_test` needs none of them, unless it scans an image with Java archives (`java_db`, which brings the vulnerability DB too).
 
 - **How a pin is fetched:** the repository rule downloads the manifest at the pinned digest, which Bazel verifies, and then the single layer at the digest the manifest names. A result is therefore reproducible for a given commit.
 - **Its age is visible:**
